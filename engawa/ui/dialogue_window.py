@@ -96,7 +96,8 @@ class DialogueWindow(QWidget):
         if session_id != self._session_id:
             return
         if kind == "message.created":
-            self._bubble.setText(THINKING)
+            message = event["message"]
+            self._bubble.setText(message["content"] if message["role"] == "system" else THINKING)
         elif kind == "generation.started":
             self._busy = True
             self._bubble.setText(THINKING)

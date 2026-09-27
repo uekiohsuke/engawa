@@ -13,24 +13,33 @@ from engawa.core.conversation import ConversationService, SessionBusyError
 from engawa.core.db import Database
 from engawa.core.events import EventHub
 from engawa.core.llm import LLMClient, create_llm
+from engawa.core.state_service import Clock, StateService, system_clock
 
 
 class PostMessage(BaseModel):
     content: str = Field(min_length=1)
 
 
-def create_app(settings: Settings | None = None, llm: LLMClient | None = None, db: Database | None = None) -> FastAPI:
+def create_app(
+    settings: Settings | None = None,
+    llm: LLMClient | None = None,
+    db: Database | None = None,
+    clock: Clock = system_clock,
+) -> FastAPI:
     settings = settings or load_settings()
     llm = llm or create_llm(settings)
     db = db or Database(settings.db_path)
     hub = EventHub()
-    conversation = ConversationService(db, llm, hub, settings.history_window)
+    state = StateService(db, hub, CHARACTERS.values(), clock, settings.state_tick_seconds)
+    conversation = ConversationService(db, llm, hub, state, settings.history_window)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         for character_id in CHARACTERS:
             db.ensure_default_sessions(character_id)
+        await state.start()
         yield
+        await state.stop()
         db.close()
 
     app = FastAPI(title="Engawa Core", lifespan=lifespan)
@@ -54,6 +63,13 @@ def create_app(settings: Settings | None = None, llm: LLMClient | None = None, d
         if get_character(character_id) is None:
             raise HTTPException(404, "character not found")
         return db.list_sessions(character_id)
+
+    @app.get("/characters/{character_id}/state")
+    async def get_state(character_id: str):
+        if get_character(character_id) is None:
+            raise HTTPException(404, "character not found")
+        await state.refresh(character_id)
+        return state.snapshot(character_id)
 
     @app.get("/sessions/{session_id}/messages")
     async def list_messages(session_id: int, limit: int = 100):

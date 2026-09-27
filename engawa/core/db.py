@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import threading
 from datetime import datetime, timezone
@@ -33,6 +34,18 @@ CREATE TABLE IF NOT EXISTS messages (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, id);
+CREATE TABLE IF NOT EXISTS character_state (
+    character_id TEXT PRIMARY KEY,
+    data TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS state_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    character_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    detail TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_state_events_character ON state_events(character_id, id);
 """
 
 
@@ -93,6 +106,37 @@ class Database:
             "content": content,
             "created_at": created_at,
         }
+
+    def load_state(self, character_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT data FROM character_state WHERE character_id = ?", (character_id,)
+            ).fetchone()
+        return json.loads(row["data"]) if row else None
+
+    def save_state(self, character_id: str, data: dict[str, Any]) -> None:
+        with self._lock, self._conn:
+            self._conn.execute(
+                "INSERT INTO character_state (character_id, data) VALUES (?, ?) "
+                "ON CONFLICT(character_id) DO UPDATE SET data = excluded.data",
+                (character_id, json.dumps(data, ensure_ascii=False)),
+            )
+
+    def add_state_event(self, character_id: str, kind: str, detail: str, created_at: str) -> None:
+        with self._lock, self._conn:
+            self._conn.execute(
+                "INSERT INTO state_events (character_id, kind, detail, created_at) VALUES (?, ?, ?, ?)",
+                (character_id, kind, detail, created_at),
+            )
+
+    def recent_state_events(self, character_id: str, limit: int) -> list[dict[str, Any]]:
+        """直近 limit 件を新しい順で返す。"""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM state_events WHERE character_id = ? ORDER BY id DESC LIMIT ?",
+                (character_id, limit),
+            ).fetchall()
+        return [dict(r) for r in rows]
 
     def recent_messages(self, session_id: int, limit: int) -> list[dict[str, Any]]:
         """直近 limit 件を古い順で返す。"""

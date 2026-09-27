@@ -10,6 +10,7 @@ from engawa.characters import Character
 from engawa.core.db import Database
 from engawa.core.events import EventHub
 from engawa.core.llm import ChatMessage, LLMClient
+from engawa.core.state_service import StateService
 
 log = logging.getLogger(__name__)
 
@@ -20,11 +21,16 @@ class SessionBusyError(Exception):
     pass
 
 
+def asleep_notice(character: Character) -> str:
+    return f"（{character.name}は眠っている。返事はない……）"
+
+
 class ConversationService:
-    def __init__(self, db: Database, llm: LLMClient, hub: EventHub, history_window: int):
+    def __init__(self, db: Database, llm: LLMClient, hub: EventHub, state: StateService, history_window: int):
         self._db = db
         self._llm = llm
         self._hub = hub
+        self._state = state
         self._history_window = history_window
         self._busy: set[int] = set()
         self._tasks: set[asyncio.Task[None]] = set()
@@ -33,8 +39,8 @@ class ConversationService:
         return session_id in self._busy
 
     def build_system_prompt(self, character: Character) -> str:
-        # 次段階：内部状態（暇度・疲労・眠気）の「現在の状態」セクションや LTM をここで追記する（仕様6章・8章）
-        return character.system_prompt()
+        # 次段階：LTM もここで追記する（仕様8章）
+        return f"{character.system_prompt()}\n\n{self._state.prompt_section(character.id)}"
 
     def build_messages(self, character: Character, session_id: int) -> list[ChatMessage]:
         messages: list[ChatMessage] = [{"role": "system", "content": self.build_system_prompt(character)}]
@@ -51,6 +57,13 @@ class ConversationService:
         self._busy.add(session_id)
         message = self._db.add_message(session_id, "user", content)
         await self._hub.publish("message.created", message=message)
+        if await self._state.is_asleep(character.id):
+            # 睡眠中は無反応。定型文の表示のみ（仕様6-3）
+            notice = self._db.add_message(session_id, "system", asleep_notice(character))
+            await self._hub.publish("message.created", message=notice)
+            self._busy.discard(session_id)
+            return message
+        await self._state.on_user_message(character.id)
         task = asyncio.create_task(self._generate(character, session_id))
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)

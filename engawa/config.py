@@ -21,6 +21,7 @@ class Settings:
     core_port: int = 8765
     data_dir: Path = PROJECT_ROOT / "data"
     history_window: int = 20
+    state_tick_seconds: float = 60.0
 
     @property
     def db_path(self) -> Path:
@@ -46,4 +47,5 @@ def load_settings() -> Settings:
         core_port=int(os.getenv("ENGAWA_CORE_PORT", defaults.core_port)),
         data_dir=data_dir,
         history_window=int(os.getenv("ENGAWA_HISTORY_WINDOW", defaults.history_window)),
+        state_tick_seconds=float(os.getenv("ENGAWA_STATE_TICK_SECONDS", defaults.state_tick_seconds)),
     )

@@ -24,9 +24,11 @@ from PySide6.QtWidgets import (
 
 from engawa.ui.client import CoreClient
 from engawa.ui.dialogue_window import DialogueWindow
+from engawa.ui.state_window import StateWindow
 from engawa.ui.widgets import MessageView
 
 CHANNEL_KINDS = ("main", "sub")
+PRESENCE_MARKS = {"both": "🟢", "message_only": "🟡", "sleeping": "🌙"}
 
 
 class MessageInput(QPlainTextEdit):
@@ -70,6 +72,8 @@ class MainWindow(QMainWindow):
         self._current_session: dict | None = None
         self._busy_sessions: set[int] = set()
         self._dialogue_windows: dict[str, DialogueWindow] = {}
+        self._state_windows: dict[str, StateWindow] = {}
+        self._character_items: dict[str, QListWidgetItem] = {}
 
         self.setWindowTitle("縁側")
         self.resize(1000, 680)
@@ -78,6 +82,14 @@ class MainWindow(QMainWindow):
         self._character_list.setToolTip("ダブルクリックで対話を始める")
         self._character_list.currentItemChanged.connect(self._on_character_selected)
         self._character_list.itemDoubleClicked.connect(lambda item: self.open_dialogue(item.data(Qt.ItemDataRole.UserRole)))
+
+        self._state_button = QPushButton("状態を見る")
+        self._state_button.clicked.connect(self._open_current_state)
+        character_column = QWidget()
+        character_layout = QVBoxLayout(character_column)
+        character_layout.setContentsMargins(0, 0, 0, 8)
+        character_layout.addWidget(self._character_list, 1)
+        character_layout.addWidget(self._state_button, alignment=Qt.AlignmentFlag.AlignHCenter)
 
         self._channel_list = QListWidget()
         self._channel_list.currentItemChanged.connect(self._on_channel_selected)
@@ -106,7 +118,7 @@ class MainWindow(QMainWindow):
 
         splitter = QSplitter()
         splitter.setHandleWidth(1)
-        splitter.addWidget(_pane("characterPane", "キャラクター", self._character_list))
+        splitter.addWidget(_pane("characterPane", "キャラクター", character_column))
         splitter.addWidget(_pane("channelPane", "チャンネル", self._channel_list))
         splitter.addWidget(chat_pane)
         splitter.setSizes([180, 200, 620])
@@ -122,6 +134,8 @@ class MainWindow(QMainWindow):
             item = QListWidgetItem(character["name"])
             item.setData(Qt.ItemDataRole.UserRole, character["id"])
             self._character_list.addItem(item)
+            self._character_items[character["id"]] = item
+            client.get(f"/characters/{character['id']}/state", self._update_presence)
         if characters:
             self._character_list.setCurrentRow(0)
 
@@ -186,6 +200,31 @@ class MainWindow(QMainWindow):
         window.raise_()
         window.activateWindow()
 
+    # --- 状態 ---
+
+    def _open_current_state(self) -> None:
+        item = self._character_list.currentItem()
+        if item is not None:
+            self.open_state(item.data(Qt.ItemDataRole.UserRole))
+
+    def open_state(self, character_id: str) -> None:
+        window = self._state_windows.get(character_id)
+        if window is None:
+            window = StateWindow(self._client, self._characters[character_id])
+            self._state_windows[character_id] = window
+        else:
+            window.reload()
+        window.show()
+        window.raise_()
+        window.activateWindow()
+
+    def _update_presence(self, state: dict) -> None:
+        item = self._character_items.get(state["character_id"])
+        if item is None:
+            return
+        name = self._characters[state["character_id"]]["name"]
+        item.setText(f"{PRESENCE_MARKS.get(state['availability'], '')} {name}　{state['availability_label']}")
+
     # --- コアからのイベント ---
 
     def _on_connection_changed(self, connected: bool) -> None:
@@ -193,6 +232,9 @@ class MainWindow(QMainWindow):
 
     def _on_event(self, event: dict) -> None:
         kind = event.get("type")
+        if kind == "state.updated":
+            self._update_presence(event["state"])
+            return
         session_id = event.get("session_id") or event.get("message", {}).get("session_id")
         if kind == "generation.started":
             self._busy_sessions.add(session_id)
@@ -215,6 +257,6 @@ class MainWindow(QMainWindow):
             self._message_view.add_notice(f"応答に失敗しました：{event.get('detail')}")
 
     def closeEvent(self, event) -> None:
-        for window in self._dialogue_windows.values():
+        for window in [*self._dialogue_windows.values(), *self._state_windows.values()]:
             window.close()
         super().closeEvent(event)
