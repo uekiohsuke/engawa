@@ -23,6 +23,7 @@ class Settings:
     history_window: int = 20
     state_tick_seconds: float = 60.0
     judge_model: str = "gemma4:e4b"
+    embed_model: str = "bge-m3"
     judge_interval_seconds: float = 60.0  # 0 以下で能動発話を無効化
     dialogue_timeout_seconds: float = 180.0
 
@@ -52,6 +53,7 @@ def load_settings() -> Settings:
         history_window=int(os.getenv("ENGAWA_HISTORY_WINDOW", defaults.history_window)),
         state_tick_seconds=float(os.getenv("ENGAWA_STATE_TICK_SECONDS", defaults.state_tick_seconds)),
         judge_model=os.getenv("ENGAWA_JUDGE_MODEL", defaults.judge_model),
+        embed_model=os.getenv("ENGAWA_EMBED_MODEL", defaults.embed_model),
         judge_interval_seconds=float(os.getenv("ENGAWA_JUDGE_INTERVAL_SECONDS", defaults.judge_interval_seconds)),
         dialogue_timeout_seconds=float(
             os.getenv("ENGAWA_DIALOGUE_TIMEOUT_SECONDS", defaults.dialogue_timeout_seconds)

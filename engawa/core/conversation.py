@@ -11,6 +11,7 @@ from engawa.characters import Character
 from engawa.core.db import Database
 from engawa.core.events import EventHub
 from engawa.core.llm import INSTRUCTION_PREFIX, ChatMessage, LLMClient
+from engawa.core.memory import STM_SESSION_KINDS, MemoryService
 from engawa.core.state_service import StateService
 
 log = logging.getLogger(__name__)
@@ -38,26 +39,44 @@ def should_say_goodnight(sleep_at: datetime, last_user_at: datetime | None) -> b
 
 
 class ConversationService:
-    def __init__(self, db: Database, llm: LLMClient, hub: EventHub, state: StateService, history_window: int):
+    def __init__(
+        self,
+        db: Database,
+        llm: LLMClient,
+        hub: EventHub,
+        state: StateService,
+        history_window: int,
+        memory: MemoryService | None = None,
+    ):
         self._db = db
         self._llm = llm
         self._hub = hub
         self._state = state
         self._history_window = history_window
+        self._memory = memory
         self._busy: set[int] = set()
         self._tasks: set[asyncio.Task[None]] = set()
 
     def is_busy(self, session_id: int) -> bool:
         return session_id in self._busy
 
-    def build_system_prompt(self, character: Character) -> str:
-        # 次段階：LTM もここで追記する（仕様8章）
-        return f"{character.system_prompt()}\n\n{self._state.prompt_section(character.id)}"
+    def build_system_prompt(self, character: Character, related: list[dict[str, Any]] | None = None) -> str:
+        sections = [character.system_prompt()]
+        if self._memory:
+            sections.append(self._memory.ltm_section(character.id))
+        sections.append(self._state.prompt_section(character.id))
+        if self._memory and related:
+            sections.append(self._memory.related_section(character, related))
+        return "\n\n".join(s for s in sections if s)
 
     def build_messages(
-        self, character: Character, session_id: int, instruction: str | None = None
+        self,
+        character: Character,
+        session_id: int,
+        instruction: str | None = None,
+        related: list[dict[str, Any]] | None = None,
     ) -> list[ChatMessage]:
-        messages: list[ChatMessage] = [{"role": "system", "content": self.build_system_prompt(character)}]
+        messages: list[ChatMessage] = [{"role": "system", "content": self.build_system_prompt(character, related)}]
         for m in self._db.recent_messages(session_id, self._history_window):
             role = ROLE_TO_LLM.get(m["role"])
             if role:
@@ -82,14 +101,16 @@ class ConversationService:
             if not was_asleep and self._just_fell_asleep_while_talking(character.id, message):
                 # おやすみの一言（能動発話側が生成する）をこの発言への返事にする
                 self._busy.discard(session_id)
+                await self._remember(character, session_id, message)
                 return message
             # 睡眠中は無反応。定型文の表示のみ（仕様6-3）
             notice = self._add_message(session_id, "system", asleep_notice(character))
             await self._hub.publish("message.created", message=notice)
+            await self._remember(character, session_id, message)
             self._busy.discard(session_id)
             return message
         await self._state.on_user_message(character.id)
-        task = asyncio.create_task(self._generate(character, session_id))
+        task = asyncio.create_task(self._generate(character, session_id, query=message))
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
         return message
@@ -100,12 +121,18 @@ class ConversationService:
             datetime.fromisoformat(sleep["created_at"]), datetime.fromisoformat(message["created_at"])
         )
 
-    async def speak(self, character: Character, session_id: int, instruction: str) -> dict[str, Any] | None:
-        """キャラクターから話しかける（能動発話）。生成し終えたメッセージを返す。セッションが使用中なら何もしない。"""
+    async def speak(
+        self, character: Character, session_id: int, instruction: str, topic: str | None = None
+    ) -> dict[str, Any] | None:
+        """キャラクターから話しかける（能動発話）。生成し終えたメッセージを返す。セッションが使用中なら何もしない。
+
+        topic（会話の種など）があれば、それに関連する記憶も思い出す。
+        """
         if session_id in self._busy:
             return None
         self._busy.add(session_id)
-        return await self._generate(character, session_id, instruction)
+        query = {"id": None, "content": topic} if topic else None
+        return await self._generate(character, session_id, instruction, query=query)
 
     async def post_character_message(self, session_id: int, content: str) -> dict[str, Any]:
         """生成を伴わずにキャラクターの発言を置く（対話→メッセージの送り直しなど）。"""
@@ -113,13 +140,43 @@ class ConversationService:
         await self._hub.publish("message.created", message=message)
         return message
 
+    async def _remember(
+        self, character: Character, session_id: int, message: dict[str, Any], embedding: list[float] | None = None
+    ) -> None:
+        if self._memory:
+            kind = self._db.get_session(session_id)["kind"]
+            await self._memory.record_message(character.id, message, kind, embedding)
+
+    async def _recall(
+        self, character: Character, session_id: int, query: dict[str, Any] | None
+    ) -> list[dict[str, Any]]:
+        """query（ユーザー発言や会話の種）に関連するSTMを探す。ユーザー発言ならSTMへの登録もここで行う。"""
+        if not self._memory or query is None:
+            return []
+        # サブスレッドは STM を参照しない（仕様4-1）
+        uses_stm = self._db.get_session(session_id)["kind"] in STM_SESSION_KINDS
+        vector = await self._memory.embed_query(query["content"]) if uses_stm else None
+        if query.get("id"):  # ユーザー発言
+            await self._remember(character, session_id, query, vector)
+        if not uses_stm:
+            return []
+        # 直近の会話履歴としてそのまま渡す発言は、思い出す対象から外す
+        window = [m["id"] for m in self._db.recent_messages(session_id, self._history_window)]
+        return await self._memory.retrieve(character.id, vector, exclude_message_ids=window)
+
     async def _generate(
-        self, character: Character, session_id: int, instruction: str | None = None
+        self,
+        character: Character,
+        session_id: int,
+        instruction: str | None = None,
+        query: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         try:
             await self._hub.publish("generation.started", session_id=session_id)
+            related = await self._recall(character, session_id, query)
             chunks: list[str] = []
-            async for delta in self._llm.stream_chat(self.build_messages(character, session_id, instruction)):
+            messages = self.build_messages(character, session_id, instruction, related)
+            async for delta in self._llm.stream_chat(messages):
                 chunks.append(delta)
                 await self._hub.publish("message.delta", session_id=session_id, delta=delta)
             reply = "".join(chunks).strip()
@@ -127,6 +184,7 @@ class ConversationService:
                 raise RuntimeError("LLM returned an empty reply")
             message = self._add_message(session_id, "character", reply)
             await self._hub.publish("message.completed", message=message)
+            await self._remember(character, session_id, message)
             return message
         except Exception as e:
             log.exception("generation failed (session %s)", session_id)

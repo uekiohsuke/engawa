@@ -321,5 +321,5 @@ def test_focus_and_judge_api(tmp_path):
         assert state["availability"] == "message_only"
         assert state["availability_label"] == "取り込み中（集中モード）"
         result = client.post("/characters/sui/judge").json()
-        assert result["judged"] and result["speak"]
+        assert result["judged"] and result["action"] == "speak"
         assert client.post("/characters/nobody/judge").status_code == 404

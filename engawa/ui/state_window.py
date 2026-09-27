@@ -1,6 +1,7 @@
 """状態確認ビュー（仕様5章）。
 
-内部状態の数値・閾値・応答可能状態・性格タグ・生活リズム・プロンプトに注入される状態・状態イベントを表示する。
+「状態」タブ：内部状態の数値・閾値・応答可能状態・性格タグ・生活リズム・プロンプトに注入される状態・状態イベント。
+「記憶」タブ：LTM・会話の種・STM（memory_panel）。
 「なぜ今そう振る舞ったか」を確認するための恒常的な機能として位置づける。
 """
 
@@ -16,11 +17,13 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
 
 from engawa.ui.client import CoreClient
+from engawa.ui.memory_panel import MemoryPanel
 from engawa.ui.widgets import COLORS, format_time
 
 STATE_STYLE = f"""
@@ -30,12 +33,22 @@ QGroupBox::title {{ subcontrol-origin: margin; left: 10px; color: {COLORS['text_
 QProgressBar {{ background: {COLORS['bg_input']}; border: none; border-radius: 4px; height: 10px; text-align: center; }}
 QProgressBar::chunk {{ background: {COLORS['character']}; border-radius: 4px; }}
 QPlainTextEdit {{ font-size: 9.5pt; }}
+QTabWidget::pane {{ border: none; }}
+QTabBar::tab {{ background: transparent; color: {COLORS['text_muted']}; padding: 6px 16px; border-bottom: 2px solid transparent; }}
+QTabBar::tab:selected {{ color: {COLORS['text']}; border-bottom: 2px solid {COLORS['accent']}; }}
 #availability {{ font-size: 12pt; font-weight: bold; }}
 """
 
 VALUE_LABELS = {"boredom": "暇度", "fatigue": "疲労", "sleepiness": "眠気"}
 AVAILABILITY_COLORS = {"both": "#23a55a", "message_only": "#f0b232", "sleeping": "#80848e"}
-EVENT_KIND_LABELS = {"crossing": "閾値", "sleep": "就寝", "wake": "起床", "judgment": "判定", "proactive": "発話"}
+EVENT_KIND_LABELS = {
+    "crossing": "閾値",
+    "sleep": "就寝",
+    "wake": "起床",
+    "judgment": "判定",
+    "proactive": "発話",
+    "memory": "記憶",
+}
 
 
 def format_hour(h: float) -> str:
@@ -51,7 +64,7 @@ class StateWindow(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setStyleSheet(STATE_STYLE)
         self.setWindowTitle(f"{character['name']}の状態")
-        self.resize(560, 900)
+        self.resize(600, 960)
 
         self._availability = QLabel("―")
         self._availability.setObjectName("availability")
@@ -108,19 +121,21 @@ class StateWindow(QWidget):
         self._events.setMinimumHeight(180)
         QVBoxLayout(events_box).addWidget(self._events)
 
-        memory_box = QGroupBox("長期記憶（LTM）")
-        memory_label = QLabel("記憶システムは未実装")
-        memory_label.setStyleSheet(f"color: {COLORS['text_muted']};")
-        QVBoxLayout(memory_box).addWidget(memory_label)
+        state_tab = QWidget()
+        state_layout = QVBoxLayout(state_tab)
+        state_layout.setContentsMargins(0, 8, 0, 0)
+        state_layout.addLayout(header)
+        state_layout.addWidget(values_box)
+        state_layout.addWidget(profile_box)
+        state_layout.addWidget(prompt_box)
+        state_layout.addWidget(events_box, 1)
 
+        tabs = QTabWidget()
+        tabs.addTab(state_tab, "状態")
+        tabs.addTab(MemoryPanel(client, character), "記憶")
         layout = QVBoxLayout(self)
         layout.setContentsMargins(16, 12, 16, 16)
-        layout.addLayout(header)
-        layout.addWidget(values_box)
-        layout.addWidget(profile_box)
-        layout.addWidget(prompt_box)
-        layout.addWidget(events_box, 1)
-        layout.addWidget(memory_box)
+        layout.addWidget(tabs)
 
         client.event_received.connect(self._on_event)
         self.reload()

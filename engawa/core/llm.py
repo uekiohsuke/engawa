@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import random
+import zlib
 from collections.abc import AsyncIterator
 from typing import Any, Protocol
 
@@ -21,6 +22,10 @@ ChatMessage = dict[str, str]
 
 # 生成層への指示（能動発話など、ユーザー発言ではない最終ターン）の先頭に付ける印
 INSTRUCTION_PREFIX = "【指示】"
+# JSON で答えさせる各処理のプロンプト先頭の印（モックが答え分けるのにも使う）
+JUDGE_PREFIX = "【判定】"
+ADJUST_PREFIX = "【記憶調整】"
+DISTILL_PREFIX = "【蒸留】"
 
 
 class LLMClient(Protocol):
@@ -131,10 +136,62 @@ class MockLLMClient:
             yield reply[i : i + 3]
 
     async def complete_json(self, messages: list[ChatMessage]) -> dict[str, Any]:
+        prompt = messages[-1]["content"]
+        if prompt.startswith(ADJUST_PREFIX):
+            return {"seeds": ["(mock) この前の話の続きを聞いてみる"], "drop_seeds": [], "self_memories": ["(mock) マスターと話すのは楽しい"]}
+        if prompt.startswith(DISTILL_PREFIX):
+            return {"conversation": "(mock) マスターとよく話した。", "self": "(mock) 今日も隣にいた。"}
         return {"action": "speak", "intent": "", "reason": "(mock) 常に話しかける"}
 
     async def ping(self) -> bool:
         return True
+
+
+# --- 埋め込み ---
+
+
+class Embedder(Protocol):
+    name: str
+
+    async def embed(self, texts: list[str]) -> list[list[float]]: ...
+
+
+class OllamaEmbedder:
+    def __init__(self, base_url: str, model: str, timeout: float = 60.0):
+        self.name = f"ollama:{model}"
+        self._base_url = base_url
+        self._model = model
+        self._timeout = timeout
+
+    async def embed(self, texts: list[str]) -> list[list[float]]:
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            resp = await client.post(f"{self._base_url}/v1/embeddings", json={"model": self._model, "input": texts})
+        resp.raise_for_status()
+        return [d["embedding"] for d in sorted(resp.json()["data"], key=lambda d: d["index"])]
+
+
+class MockEmbedder:
+    """文字バイグラムのハッシュによる簡易ベクトル。文字の重なりが多いほど類似度が高くなる。"""
+
+    name = "mock"
+    DIM = 256
+
+    async def embed(self, texts: list[str]) -> list[list[float]]:
+        vectors = []
+        for text in texts:
+            v = [0.0] * self.DIM
+            for a, b in zip(text, text[1:]):
+                v[zlib.crc32((a + b).encode("utf-8")) % self.DIM] += 1.0
+            vectors.append(v)
+        return vectors
+
+
+def create_embedder(settings: Settings) -> Embedder:
+    if settings.llm_backend == "ollama":
+        return OllamaEmbedder(settings.llm_url, settings.embed_model)
+    if settings.llm_backend == "mock":
+        return MockEmbedder()
+    raise ValueError(f"unknown ENGAWA_LLM_BACKEND: {settings.llm_backend}")
 
 
 def create_llm(settings: Settings) -> LLMClient:

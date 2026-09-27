@@ -14,7 +14,8 @@ from engawa.config import Settings, load_settings
 from engawa.core.conversation import ConversationService, SessionBusyError
 from engawa.core.db import Database
 from engawa.core.events import EventHub
-from engawa.core.llm import LLMClient, create_judge_llm, create_llm
+from engawa.core.llm import Embedder, LLMClient, create_embedder, create_judge_llm, create_llm
+from engawa.core.memory import MemoryService
 from engawa.core.proactive import ProactiveService
 from engawa.core.state_service import Clock, StateService, system_clock
 
@@ -34,14 +35,17 @@ def create_app(
     clock: Clock = system_clock,
     judge_llm: LLMClient | None = None,
     rand: Callable[[], float] = random.random,
+    embedder: Embedder | None = None,
 ) -> FastAPI:
     settings = settings or load_settings()
     llm = llm or create_llm(settings)
     db = db or Database(settings.db_path)
     hub = EventHub()
     judge_llm = judge_llm or create_judge_llm(settings)
+    embedder = embedder or create_embedder(settings)
     state = StateService(db, hub, CHARACTERS.values(), clock, settings.state_tick_seconds)
-    conversation = ConversationService(db, llm, hub, state, settings.history_window)
+    memory = MemoryService(db, hub, state, llm, embedder, CHARACTERS.values(), rand)
+    conversation = ConversationService(db, llm, hub, state, settings.history_window, memory)
     proactive = ProactiveService(
         db,
         hub,
@@ -52,6 +56,7 @@ def create_app(
         settings.judge_interval_seconds,
         settings.dialogue_timeout_seconds,
         rand,
+        memory,
     )
 
     @asynccontextmanager
@@ -66,7 +71,17 @@ def create_app(
         db.close()
 
     app = FastAPI(title="Engawa Core", lifespan=lifespan)
-    app.state.services = {"db": db, "state": state, "conversation": conversation, "proactive": proactive}
+    app.state.services = {
+        "db": db,
+        "state": state,
+        "memory": memory,
+        "conversation": conversation,
+        "proactive": proactive,
+    }
+
+    def require_character(character_id: str) -> None:
+        if get_character(character_id) is None:
+            raise HTTPException(404, "character not found")
 
     def require_session(session_id: int) -> dict:
         session = db.get_session(session_id)
@@ -103,7 +118,27 @@ def create_app(
         decision = await proactive.evaluate(character_id, force=True)
         if decision is None:
             return {"judged": False, "reason": "睡眠中"}
-        return {"judged": True, "speak": decision.speak, "intent": decision.intent, "reason": decision.reason}
+        return {"judged": True, "action": decision.action, "intent": decision.intent, "reason": decision.reason}
+
+    @app.get("/characters/{character_id}/memory")
+    async def get_memory(character_id: str):
+        require_character(character_id)
+        return memory.snapshot(character_id)
+
+    @app.post("/characters/{character_id}/memory/adjust")
+    async def adjust_memory(character_id: str):
+        """調整用：判定層を通さずに記憶調整を行う。"""
+        require_character(character_id)
+        return await memory.adjust(character_id)
+
+    @app.post("/characters/{character_id}/memory/distill")
+    async def distill_memory(character_id: str):
+        """調整用：睡眠を待たずに夜間蒸留を行う。"""
+        require_character(character_id)
+        result = await memory.distill(character_id)
+        if result is None:
+            raise HTTPException(409, "distillation is already running")
+        return result
 
     @app.get("/focus")
     async def get_focus():

@@ -1,17 +1,19 @@
 """能動発話（仕様3章・4-1・6-4）。
 
-  [状態の定期変化・閾値クロス検知]（state_service）
+  [状態の定期変化・閾値クロス検知]（state_service）／ 未整理の会話（memory）
         ↓
-  確率的ゲート（コード）：暇度と、性格タグに応じた閾値クロス時の確率。会話直後などは通さない
+  確率的ゲート（コード）：暇度・性格タグに応じた閾値クロス時の確率・未整理の会話。会話直後などは通さない
         ↓
-  判定層（軽量LLM）：沈黙 か 発話＋意図タグ（固定プール）
+  判定層（軽量LLM）：沈黙 ／ 発話＋意図タグ（固定プール） ／ 記憶調整
+        ↓（発話）
+  コード：会話の種を1つ選ぶ（無ければ即興）
         ↓
   生成層（会話用LLM）：応答可能状態に応じて対話（自動で開く）かメッセージ（#main）で話しかける
         ↓
   対話で一定時間返事がなければ、同じ内容を #main にメッセージとして送り直す
 
-判定層の「記憶調整」アクション（仕様6-4 c）と、会話の種の選定は記憶システムの実装時に追加する。
-会話の種が無い現状では能動発話はすべて即興だが、メッセージの送り先は当面 #main とする（仕様4-1の例外）。
+眠りに落ちたら（会話中ならおやすみを言ってから）夜間蒸留を行う。
+即興の発話もサブスレッドではなく当面 #main に送る（仕様4-1の例外。サブスレッドは次段階）。
 """
 
 from __future__ import annotations
@@ -29,7 +31,8 @@ from engawa.characters import Character, Personality
 from engawa.core.conversation import ConversationService, should_say_goodnight
 from engawa.core.db import Database
 from engawa.core.events import EventHub
-from engawa.core.llm import LLMClient
+from engawa.core.llm import JUDGE_PREFIX, LLMClient
+from engawa.core.memory import MemoryService
 from engawa.core.state import (
     AVAILABILITY_BOTH,
     AVAILABILITY_LABELS,
@@ -54,7 +57,17 @@ TRIGGER_INTENTS = {
     "fatigue": ("疲労回復",),
     "sleepiness": ("就寝前",),
 }
-TRIGGER_LABELS = {"boredom": "暇度", "fatigue": "疲労の閾値クロス", "sleepiness": "就寝前会話の閾値クロス"}
+TRIGGER_LABELS = {
+    "boredom": "暇度",
+    "fatigue": "疲労の閾値クロス",
+    "sleepiness": "就寝前会話の閾値クロス",
+    "memory": "未整理の会話",
+}
+MEMORY_TRIGGER = "memory"
+
+ACTION_SPEAK = "speak"
+ACTION_SILENT = "silent"
+ACTION_MEMORY = "memory"
 
 # --- 確率的ゲート ---
 BOREDOM_MIN = 0.3
@@ -68,6 +81,8 @@ MESSAGE_ONLY_FACTOR = 0.5  # 取り込み中は話しかけにくい
 CONVERSATION_COOLDOWN = timedelta(minutes=10)
 PROACTIVE_COOLDOWN = timedelta(minutes=30)  # 返事のない話しかけが続くと倍々に延びる
 MAX_UNANSWERED = 3
+MEMORY_MIN_UNPROCESSED = 4  # 未整理の会話がこれだけ溜まったら、記憶調整のきっかけとして判定層に回す
+MEMORY_PROBABILITY = 0.5
 
 FAREWELL = "おやすみ"
 FAREWELL_INSTRUCTION = (
@@ -96,25 +111,34 @@ def gate(
     since_conversation: timedelta | None,
     since_proactive: timedelta | None,
     unanswered: int,
+    unprocessed: int = 0,
 ) -> GateResult:
     """判定層に回す確率を求める。"""
     if availability == AVAILABILITY_SLEEPING:
         return GateResult(blocked="睡眠中")
-    if unanswered >= MAX_UNANSWERED:
-        return GateResult(blocked=f"返事のない話しかけが{unanswered}回続いている")
     if since_conversation is not None and since_conversation < CONVERSATION_COOLDOWN:
         return GateResult(blocked="会話した直後")
-    if since_proactive is not None and since_proactive < PROACTIVE_COOLDOWN * 2**unanswered:
-        return GateResult(blocked="前回話しかけてから間もない")
 
     triggers: dict[str, float] = {}
-    if state.boredom >= BOREDOM_MIN:
-        triggers["boredom"] = BOREDOM_PROBABILITY_SCALE * state.boredom**2
-    for key in crossings:
-        if key in CROSSING_PROBABILITY:
-            triggers[key] = CROSSING_PROBABILITY[key][_crossing_tag(key, personality)]
-    factor = MESSAGE_ONLY_FACTOR if availability == AVAILABILITY_MESSAGE_ONLY else 1.0
-    probability = 1 - math.prod(1 - p * factor for p in triggers.values())
+    if unprocessed >= MEMORY_MIN_UNPROCESSED:
+        triggers[MEMORY_TRIGGER] = MEMORY_PROBABILITY
+
+    speak_blocked = None
+    if unanswered >= MAX_UNANSWERED:
+        speak_blocked = f"返事のない話しかけが{unanswered}回続いている"
+    elif since_proactive is not None and since_proactive < PROACTIVE_COOLDOWN * 2**unanswered:
+        speak_blocked = "前回話しかけてから間もない"
+    if not speak_blocked:
+        factor = MESSAGE_ONLY_FACTOR if availability == AVAILABILITY_MESSAGE_ONLY else 1.0
+        if state.boredom >= BOREDOM_MIN:
+            triggers["boredom"] = BOREDOM_PROBABILITY_SCALE * state.boredom**2 * factor
+        for key in crossings:
+            if key in CROSSING_PROBABILITY:
+                triggers[key] = CROSSING_PROBABILITY[key][_crossing_tag(key, personality)] * factor
+
+    if not triggers:
+        return GateResult(blocked=speak_blocked)
+    probability = 1 - math.prod(1 - p for p in triggers.values())
     return GateResult(probability, triggers)
 
 
@@ -123,9 +147,13 @@ def gate(
 
 @dataclass(frozen=True)
 class Decision:
-    speak: bool
+    action: str  # speak / silent / memory
     intent: str | None
     reason: str
+
+    @property
+    def speak(self) -> bool:
+        return self.action == ACTION_SPEAK
 
 
 def candidate_intents(triggers: Iterable[str]) -> list[str]:
@@ -146,13 +174,20 @@ def build_judge_messages(
     triggers: Iterable[str],
     since_conversation: timedelta | None,
     now: datetime,
+    unprocessed: int = 0,
 ) -> list[dict[str, str]]:
     p = character.personality
+    triggers = list(triggers)
     candidates = candidate_intents(triggers)
+    allow_memory = MEMORY_TRIGGER in triggers
+    actions = [
+        *([f'"{ACTION_SPEAK}"（マスターに話しかける）'] if candidates else []),
+        *([f'"{ACTION_MEMORY}"（ひとりで最近の会話を振り返り、記憶を整理する）'] if allow_memory else []),
+        f'"{ACTION_SILENT}"（何もしない）',
+    ]
     prompt = "\n".join(
         [
-            f"あなたはキャラクター「{character.name}」の行動判定係です。{character.name}が今、"
-            "マスター（ユーザー）に自分から話しかけるかどうかを判定してください。",
+            f"{JUDGE_PREFIX}あなたはキャラクター「{character.name}」の行動判定係です。{character.name}が今どう過ごすかを判定してください。",
             "話しかけすぎは鬱陶しく、話しかけなさすぎは寂しい。性格と今の状態から、その人らしい判断をすること。",
             "",
             f"- 現在時刻：{now:%H:%M}",
@@ -160,39 +195,47 @@ def build_judge_messages(
             f"- 応答可能状態：{AVAILABILITY_LABELS[availability]}",
             f"- 性格：疲労反応＝{p.fatigue_response}、眠気反応＝{p.sleepiness_response}、暇度感度＝×{p.boredom_sensitivity}",
             f"- 最後にマスターと会話したのは：{_format_elapsed(since_conversation)}",
+            f"- まだ振り返っていない会話：{unprocessed}件",
             f"- 今回のきっかけ：{'、'.join(TRIGGER_LABELS[t] for t in triggers)}",
-            f"- 意図の候補：{'／'.join(f'{i}（{INTENTS[i]}）' for i in candidates)}",
+            *([f"- 話しかける場合の意図の候補：{'／'.join(f'{i}（{INTENTS[i]}）' for i in candidates)}"] if candidates else []),
+            f"- 選べる行動：{'、'.join(actions)}",
             "",
-            'JSONのみで答えること：{"action": "speak" または "silent", '
-            '"intent": 候補の名前のいずれか（silent なら null）, "reason": "30字以内の理由"}',
+            'JSONのみで答えること：{"action": 選べる行動のいずれか, '
+            '"intent": 話しかける場合は意図の候補の名前（それ以外は null）, "reason": "30字以内の理由"}',
         ]
     )
     return [{"role": "user", "content": prompt}]
 
 
-async def judge(llm: LLMClient, messages: list[dict[str, str]], candidates: list[str]) -> Decision:
+async def judge(
+    llm: LLMClient, messages: list[dict[str, str]], candidates: list[str], allow_memory: bool = False
+) -> Decision:
     try:
         data: Any = await llm.complete_json(messages)
     except Exception as e:
         log.exception("judge failed")
-        return Decision(False, None, f"判定層エラー：{type(e).__name__}")
+        return Decision(ACTION_SILENT, None, f"判定層エラー：{type(e).__name__}")
     if not isinstance(data, dict):
-        return Decision(False, None, "判定層の出力が不正")
+        return Decision(ACTION_SILENT, None, "判定層の出力が不正")
     reason = str(data.get("reason") or "")
-    if data.get("action") != "speak" or not candidates:
-        return Decision(False, None, reason)
-    intent = data.get("intent")
-    return Decision(True, intent if intent in candidates else candidates[0], reason)
+    action = data.get("action")
+    if action == ACTION_SPEAK and candidates:
+        intent = data.get("intent")
+        return Decision(ACTION_SPEAK, intent if intent in candidates else candidates[0], reason)
+    if action == ACTION_MEMORY and allow_memory:
+        return Decision(ACTION_MEMORY, None, reason)
+    return Decision(ACTION_SILENT, None, reason)
 
 
-def proactive_instruction(intent: str, since_conversation: timedelta | None) -> str:
+def proactive_instruction(intent: str, since_conversation: timedelta | None, seed: str | None = None) -> str:
     elapsed = (
         "マスターとはまだ話したことがない。"
         if since_conversation is None
         else f"最後にマスターと話したのは{_format_elapsed(since_conversation)}。"
     )
+    topic = f"話題：前から話してみたかった「{seed}」について振ること。" if seed else ""
     return (
-        f"ここはあなたから話しかける場面。意図：{INTENTS[intent]}。{elapsed}"
+        f"ここはあなたから話しかける場面。意図：{INTENTS[intent]}。{elapsed}{topic}"
         "状況と今の調子に合った、自然な話しかけの一言を1〜2文で言うこと。この指示には触れないこと。"
     )
 
@@ -212,12 +255,14 @@ class ProactiveService:
         interval_seconds: float = 60.0,
         dialogue_timeout_seconds: float = 180.0,
         rand: Callable[[], float] = random.random,
+        memory: MemoryService | None = None,
     ):
         self._db = db
         self._hub = hub
         self._state = state
         self._conversation = conversation
         self._judge_llm = judge_llm
+        self._memory = memory
         self._characters = {c.id: c for c in characters}
         self._interval = interval_seconds
         self._dialogue_timeout = dialogue_timeout_seconds
@@ -276,6 +321,7 @@ class ProactiveService:
         now = self._state.now()
         availability = self._state.availability(character_id)
         since_conversation = self._since(self._db.last_message(character_id), now)
+        unprocessed = len(self._memory.unprocessed(character_id)) if self._memory else 0
         times = self._proactive_times[character_id]
         result = gate(
             state=self._state.state(character_id),
@@ -285,24 +331,34 @@ class ProactiveService:
             since_conversation=since_conversation,
             since_proactive=now - times[-1] if times else None,
             unanswered=self._unanswered(character_id),
+            unprocessed=unprocessed,
         )
         if force and availability != AVAILABILITY_SLEEPING:
-            triggers = result.triggers or {"boredom": BOREDOM_PROBABILITY_SCALE * self._state.state(character_id).boredom**2}
-            result = GateResult(1.0, triggers)
+            triggers = {"boredom": BOREDOM_PROBABILITY_SCALE * self._state.state(character_id).boredom**2}
+            if unprocessed:
+                triggers[MEMORY_TRIGGER] = MEMORY_PROBABILITY
+            result = GateResult(1.0, result.triggers | triggers)
         elif result.blocked or not result.triggers or self._rand() >= result.probability:
             return None
 
         candidates = candidate_intents(result.triggers)
+        allow_memory = MEMORY_TRIGGER in result.triggers
         messages = build_judge_messages(
-            character, self._state.state(character_id), availability, result.triggers, since_conversation, now
+            character, self._state.state(character_id), availability, result.triggers, since_conversation, now, unprocessed
         )
-        decision = await judge(self._judge_llm, messages, candidates)
+        decision = await judge(self._judge_llm, messages, candidates, allow_memory)
         triggers = "、".join(f"{TRIGGER_LABELS[t]} {p:.2f}" for t, p in result.triggers.items())
         gate_note = "手動判定" if force else f"きっかけ：{triggers}／通過確率 {result.probability:.2f}"
-        verdict = f"発話する（{decision.intent}）" if decision.speak else "沈黙"
+        verdict = {
+            ACTION_SPEAK: f"発話する（{decision.intent}）",
+            ACTION_MEMORY: "記憶調整",
+            ACTION_SILENT: "沈黙",
+        }[decision.action]
         await self._state.record(character_id, "judgment", f"{verdict}：{decision.reason}　［{gate_note}］")
-        if decision.speak:
+        if decision.action == ACTION_SPEAK:
             await self.speak(character_id, decision.intent, since_conversation)
+        elif decision.action == ACTION_MEMORY and self._memory:
+            await self._memory.adjust(character_id)
         return decision
 
     # --- 発話 ---
@@ -326,19 +382,31 @@ class ProactiveService:
             kind = self._db.get_session(session_id)["kind"]
         mode = "dialogue" if kind == "dialogue" else "message"
 
+        # 会話の種を1つ選ぶ（仕様6-4：選ぶのはコード）。無ければ即興
+        seed = self._memory.pick_seed(character_id) if self._memory and intent != FAREWELL else None
         await self._hub.publish(
             "proactive.started", character_id=character_id, session_id=session_id, mode=mode, intent=intent
         )
-        instruction = FAREWELL_INSTRUCTION if intent == FAREWELL else proactive_instruction(intent, since_conversation)
-        message = await self._conversation.speak(character, session_id, instruction)
+        if intent == FAREWELL:
+            instruction = FAREWELL_INSTRUCTION
+        else:
+            instruction = proactive_instruction(intent, since_conversation, seed["content"] if seed else None)
+        message = await self._conversation.speak(
+            character, session_id, instruction, topic=seed["content"] if seed else None
+        )
         if message is None:
             return None
 
         self._proactive_times[character_id].append(self._state.now())
+        if seed:
+            await self._memory.mark_seed_used(character_id, seed["id"])
         if intent != FAREWELL:
             await self._state.on_proactive(character_id)
+        topic = f"・種：{seed['content']}" if seed else "・即興"
         await self._state.record(
-            character_id, "proactive", f"{'対話' if mode == 'dialogue' else 'メッセージ'}で話しかけた（{intent}）"
+            character_id,
+            "proactive",
+            f"{'対話' if mode == 'dialogue' else 'メッセージ'}で話しかけた（{intent}{'' if intent == FAREWELL else topic}）",
         )
         if mode == "dialogue" and intent != FAREWELL:
             self._spawn(self._fallback_if_unanswered(character_id, session_id, message))
@@ -361,8 +429,18 @@ class ProactiveService:
                 self._pending_crossings[character_id].add(event.key)
         sleep = next((e for e in events if e.kind == "sleep"), None)
         if sleep:
-            last_user = self._db.last_message(character_id, ("user",))
-            last_user_at = datetime.fromisoformat(last_user["created_at"]) if last_user else None
-            if should_say_goodnight(datetime.fromisoformat(sleep.at), last_user_at):
-                # 会話中に眠りに落ちるときは、判定層を通さずにおやすみを言って切り上げる（仕様6-3）
-                self._spawn(self.speak(character_id, FAREWELL, session_id=last_user["session_id"]))
+            self._spawn(self._fall_asleep(character_id, sleep))
+
+    async def _fall_asleep(self, character_id: str, sleep: StateEvent) -> None:
+        last_user = self._db.last_message(character_id, ("user",))
+        last_user_at = datetime.fromisoformat(last_user["created_at"]) if last_user else None
+        if should_say_goodnight(datetime.fromisoformat(sleep.at), last_user_at):
+            # 会話中に眠りに落ちるときは、判定層を通さずにおやすみを言って切り上げる（仕様6-3）
+            await self.speak(character_id, FAREWELL, session_id=last_user["session_id"])
+        if self._memory:
+            # 睡眠中に夜間蒸留（仕様8-2）。おやすみの一言も含めるため、その後に行う
+            try:
+                await self._memory.distill(character_id)
+            except Exception:
+                log.exception("distillation failed")
+                await self._state.record(character_id, "memory", "夜間蒸留に失敗した（ログを参照）")
