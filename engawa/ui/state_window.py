@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QListWidget,
     QPlainTextEdit,
     QProgressBar,
+    QPushButton,
     QVBoxLayout,
     QWidget,
 )
@@ -34,7 +35,7 @@ QPlainTextEdit {{ font-size: 9.5pt; }}
 
 VALUE_LABELS = {"boredom": "暇度", "fatigue": "疲労", "sleepiness": "眠気"}
 AVAILABILITY_COLORS = {"both": "#23a55a", "message_only": "#f0b232", "sleeping": "#80848e"}
-EVENT_KIND_LABELS = {"crossing": "閾値", "sleep": "就寝", "wake": "起床"}
+EVENT_KIND_LABELS = {"crossing": "閾値", "sleep": "就寝", "wake": "起床", "judgment": "判定", "proactive": "発話"}
 
 
 def format_hour(h: float) -> str:
@@ -50,16 +51,20 @@ class StateWindow(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setStyleSheet(STATE_STYLE)
         self.setWindowTitle(f"{character['name']}の状態")
-        self.resize(520, 760)
+        self.resize(560, 900)
 
         self._availability = QLabel("―")
         self._availability.setObjectName("availability")
         self._updated = QLabel()
         self._updated.setStyleSheet(f"color: {COLORS['text_muted']};")
+        self._judge_button = QPushButton("今すぐ判定")
+        self._judge_button.setToolTip("調整用：確率的ゲートを無視して判定層を呼ぶ（睡眠中は不可）")
+        self._judge_button.clicked.connect(self._judge_now)
         header = QHBoxLayout()
         header.addWidget(self._availability)
         header.addStretch(1)
         header.addWidget(self._updated)
+        header.addWidget(self._judge_button)
 
         values_box = QGroupBox("状態量")
         values_form = QFormLayout(values_box)
@@ -94,11 +99,13 @@ class StateWindow(QWidget):
         prompt_box = QGroupBox("プロンプトに注入される状態")
         self._prompt = QPlainTextEdit()
         self._prompt.setReadOnly(True)
-        self._prompt.setFixedHeight(150)
+        self._prompt.setFixedHeight(130)
         QVBoxLayout(prompt_box).addWidget(self._prompt)
 
         events_box = QGroupBox("状態イベント（新しい順）")
         self._events = QListWidget()
+        self._events.setWordWrap(True)
+        self._events.setMinimumHeight(180)
         QVBoxLayout(events_box).addWidget(self._events)
 
         memory_box = QGroupBox("長期記憶（LTM）")
@@ -120,6 +127,15 @@ class StateWindow(QWidget):
 
     def reload(self) -> None:
         self._client.get(f"/characters/{self._character_id}/state", self.apply)
+
+    def _judge_now(self) -> None:
+        self._judge_button.setEnabled(False)
+        self._client.post(
+            f"/characters/{self._character_id}/judge",
+            {},
+            lambda _: self._judge_button.setEnabled(True),
+            lambda status, detail: self._judge_button.setEnabled(True),
+        )
 
     def _on_event(self, event: dict) -> None:
         if event.get("type") == "state.updated" and event.get("character_id") == self._character_id:

@@ -43,6 +43,8 @@ QPushButton {{
     background: {COLORS['accent']}; color: white; border: none; border-radius: 4px; padding: 6px 14px;
 }}
 QPushButton:disabled {{ background: {COLORS['bg_hover']}; color: {COLORS['text_muted']}; }}
+#focusButton {{ background: {COLORS['bg_hover']}; color: {COLORS['text']}; }}
+#focusButton:checked {{ background: #f0b232; color: #1e1f22; font-weight: bold; }}
 QStatusBar {{ background: {COLORS['bg_sidebar']}; color: {COLORS['text_muted']}; }}
 QScrollBar:vertical {{ background: transparent; width: 8px; }}
 QScrollBar::handle:vertical {{ background: {COLORS['bg_sidebar']}; border-radius: 4px; min-height: 24px; }}

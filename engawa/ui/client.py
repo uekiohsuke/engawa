@@ -45,9 +45,29 @@ class CoreClient(QObject):
         on_success: JsonCallback | None = None,
         on_error: ErrorCallback | None = None,
     ) -> None:
+        self._send_json("POST", path, body, on_success, on_error)
+
+    def put(
+        self,
+        path: str,
+        body: dict[str, Any],
+        on_success: JsonCallback | None = None,
+        on_error: ErrorCallback | None = None,
+    ) -> None:
+        self._send_json("PUT", path, body, on_success, on_error)
+
+    def _send_json(
+        self,
+        method: str,
+        path: str,
+        body: dict[str, Any],
+        on_success: JsonCallback | None,
+        on_error: ErrorCallback | None,
+    ) -> None:
         request = QNetworkRequest(QUrl(self._base_url + path))
         request.setHeader(QNetworkRequest.KnownHeaders.ContentTypeHeader, "application/json")
-        reply = self._nam.post(request, json.dumps(body).encode("utf-8"))
+        data = json.dumps(body).encode("utf-8")
+        reply = self._nam.post(request, data) if method == "POST" else self._nam.put(request, data)
         reply.finished.connect(lambda: self._handle_reply(reply, on_success, on_error))
 
     def _handle_reply(self, reply: QNetworkReply, on_success: JsonCallback | None, on_error: ErrorCallback | None) -> None:

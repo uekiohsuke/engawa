@@ -27,6 +27,7 @@ BOREDOM_GAIN_PER_HOUR = 1 / 3  # 活動時間帯なら約3時間で最大
 BOREDOM_BUSY_FACTOR = 0.3  # 何かしている時間帯は溜まりにくい
 BOREDOM_DECAY_ASLEEP_PER_HOUR = 0.1
 BOREDOM_PER_MESSAGE = -0.15
+BOREDOM_PER_PROACTIVE = -0.1
 FATIGUE_GAIN_PER_HOUR = 0.04  # 起床から就寝（17時間）で約0.7
 FATIGUE_RECOVERY_ASLEEP_PER_HOUR = 0.1
 FATIGUE_PER_MESSAGE = -0.02
@@ -105,6 +106,7 @@ class StateEvent:
     kind: str  # crossing / sleep / wake
     detail: str
     at: str
+    key: str | None = None  # crossing のときの状態量（boredom / fatigue / sleepiness）
 
 
 def _level(value: float, labels: tuple[str, str, str, str]) -> str:
@@ -139,10 +141,11 @@ class StateEngine:
     def rhythm(self) -> RhythmProfile:
         return self.character.rhythm
 
-    def availability(self, now: datetime) -> str:
+    def availability(self, now: datetime, focus_mode: bool = False) -> str:
         if self.state.asleep:
             return AVAILABILITY_SLEEPING
-        if in_busy_block(day_hour(now, self.rhythm), self.rhythm):
+        # 集中モード中は生活リズムに関わらずメッセージのみ（仕様5章）
+        if focus_mode or in_busy_block(day_hour(now, self.rhythm), self.rhythm):
             return AVAILABILITY_MESSAGE_ONLY
         return AVAILABILITY_BOTH
 
@@ -186,7 +189,7 @@ class StateEngine:
 
     def _crossings(self, before: dict[str, Any], t: datetime) -> list[StateEvent]:
         return [
-            StateEvent("crossing", f"{detail}（{threshold}）", t.isoformat())
+            StateEvent("crossing", f"{detail}（{threshold}）", t.isoformat(), key)
             for key, threshold, detail in CROSSINGS
             if before[key] < threshold <= getattr(self.state, key)
         ]
@@ -196,6 +199,12 @@ class StateEngine:
         events = self.tick(now)
         self.state.boredom = _clamp(self.state.boredom + BOREDOM_PER_MESSAGE)
         self.state.fatigue = _clamp(self.state.fatigue + FATIGUE_PER_MESSAGE)
+        return events
+
+    def on_proactive(self, now: datetime) -> list[StateEvent]:
+        """自分から話しかけたことによる増減（返事がなくても少しは気が紛れる）。"""
+        events = self.tick(now)
+        self.state.boredom = _clamp(self.state.boredom + BOREDOM_PER_PROACTIVE)
         return events
 
     def prompt_section(self, now: datetime) -> str:
@@ -215,15 +224,19 @@ class StateEngine:
             lines.append(f"- {SLEEPINESS_HINTS[p.sleepiness_response]}")
         return "\n".join(lines)
 
-    def snapshot(self, now: datetime) -> dict[str, Any]:
+    def snapshot(self, now: datetime, focus_mode: bool = False) -> dict[str, Any]:
         p = self.character.personality
-        availability = self.availability(now)
+        availability = self.availability(now, focus_mode)
+        label = AVAILABILITY_LABELS[availability]
+        if focus_mode and availability == AVAILABILITY_MESSAGE_ONLY:
+            label += "（集中モード）"
         return {
             "character_id": self.character.id,
             "values": {"boredom": self.state.boredom, "fatigue": self.state.fatigue, "sleepiness": self.state.sleepiness},
             "asleep": self.state.asleep,
             "availability": availability,
-            "availability_label": AVAILABILITY_LABELS[availability],
+            "availability_label": label,
+            "focus_mode": focus_mode,
             "thresholds": {
                 "boredom": {"高い": BOREDOM_HIGH},
                 "fatigue": {"高い": FATIGUE_HIGH},

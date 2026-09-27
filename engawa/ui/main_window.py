@@ -85,10 +85,18 @@ class MainWindow(QMainWindow):
 
         self._state_button = QPushButton("状態を見る")
         self._state_button.clicked.connect(self._open_current_state)
+        self._focus_button = QPushButton()
+        self._focus_button.setObjectName("focusButton")
+        self._focus_button.setCheckable(True)
+        self._focus_button.setToolTip("ONの間は対話で話しかけず、メッセージだけで送ってくる")
+        self._focus_button.clicked.connect(self._toggle_focus)
+        self._set_focus_button(False)
+        client.get("/focus", lambda result: self._set_focus_button(result["enabled"]))
         character_column = QWidget()
         character_layout = QVBoxLayout(character_column)
         character_layout.setContentsMargins(0, 0, 0, 8)
         character_layout.addWidget(self._character_list, 1)
+        character_layout.addWidget(self._focus_button, alignment=Qt.AlignmentFlag.AlignHCenter)
         character_layout.addWidget(self._state_button, alignment=Qt.AlignmentFlag.AlignHCenter)
 
         self._channel_list = QListWidget()
@@ -190,15 +198,28 @@ class MainWindow(QMainWindow):
 
     # --- 対話ウィンドウ ---
 
-    def open_dialogue(self, character_id: str) -> None:
+    def open_dialogue(self, character_id: str, activate: bool = True) -> None:
+        """対話ウィンドウを開く。キャラクターから話しかけるときは activate=False で、入力中の作業からフォーカスを奪わない。"""
         window = self._dialogue_windows.get(character_id)
         if window is None:
             session = next(s for s in self._sessions[character_id] if s["kind"] == "dialogue")
             window = DialogueWindow(self._client, self._characters[character_id], session["id"])
             self._dialogue_windows[character_id] = window
+        window.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, not activate)
         window.show()
         window.raise_()
-        window.activateWindow()
+        if activate:
+            window.activateWindow()
+
+    # --- 集中モード ---
+
+    def _set_focus_button(self, enabled: bool) -> None:
+        self._focus_button.setChecked(enabled)
+        self._focus_button.setText(f"集中モード：{'ON' if enabled else 'OFF'}")
+
+    def _toggle_focus(self) -> None:
+        enabled = self._focus_button.isChecked()
+        self._client.put("/focus", {"enabled": enabled}, lambda result: self._set_focus_button(result["enabled"]))
 
     # --- 状態 ---
 
@@ -234,6 +255,16 @@ class MainWindow(QMainWindow):
         kind = event.get("type")
         if kind == "state.updated":
             self._update_presence(event["state"])
+            self._set_focus_button(event["state"]["focus_mode"])
+            return
+        if kind == "proactive.started":
+            if event["mode"] == "dialogue":
+                self.open_dialogue(event["character_id"], activate=False)
+            return
+        if kind == "dialogue.fallback":
+            window = self._dialogue_windows.get(event["character_id"])
+            if window is not None:
+                window.hide()
             return
         session_id = event.get("session_id") or event.get("message", {}).get("session_id")
         if kind == "generation.started":

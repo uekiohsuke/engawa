@@ -46,6 +46,10 @@ CREATE TABLE IF NOT EXISTS state_events (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_state_events_character ON state_events(character_id, id);
+CREATE TABLE IF NOT EXISTS app_settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 """
 
 
@@ -92,8 +96,8 @@ class Database:
             row = self._conn.execute("SELECT * FROM sessions WHERE id = ?", (session_id,)).fetchone()
         return dict(row) if row else None
 
-    def add_message(self, session_id: int, role: str, content: str) -> dict[str, Any]:
-        created_at = _now()
+    def add_message(self, session_id: int, role: str, content: str, created_at: str | None = None) -> dict[str, Any]:
+        created_at = created_at or _now()
         with self._lock, self._conn:
             cur = self._conn.execute(
                 "INSERT INTO messages (session_id, role, content, created_at) VALUES (?, ?, ?, ?)",
@@ -137,6 +141,38 @@ class Database:
                 (character_id, limit),
             ).fetchall()
         return [dict(r) for r in rows]
+
+    def get_setting(self, key: str, default: Any = None) -> Any:
+        with self._lock:
+            row = self._conn.execute("SELECT value FROM app_settings WHERE key = ?", (key,)).fetchone()
+        return json.loads(row["value"]) if row else default
+
+    def set_setting(self, key: str, value: Any) -> None:
+        with self._lock, self._conn:
+            self._conn.execute(
+                "INSERT INTO app_settings (key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (key, json.dumps(value)),
+            )
+
+    def last_message(self, character_id: str, roles: tuple[str, ...] = ("user", "character")) -> dict[str, Any] | None:
+        """キャラクターの全セッションを通じた最新のメッセージ。"""
+        placeholders = ",".join("?" * len(roles))
+        with self._lock:
+            row = self._conn.execute(
+                f"SELECT m.* FROM messages m JOIN sessions s ON m.session_id = s.id "
+                f"WHERE s.character_id = ? AND m.role IN ({placeholders}) ORDER BY m.id DESC LIMIT 1",
+                (character_id, *roles),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def has_user_message_after(self, session_id: int, message_id: int) -> bool:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT 1 FROM messages WHERE session_id = ? AND id > ? AND role = 'user' LIMIT 1",
+                (session_id, message_id),
+            ).fetchone()
+        return row is not None
 
     def recent_messages(self, session_id: int, limit: int) -> list[dict[str, Any]]:
         """直近 limit 件を古い順で返す。"""

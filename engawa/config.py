@@ -22,6 +22,9 @@ class Settings:
     data_dir: Path = PROJECT_ROOT / "data"
     history_window: int = 20
     state_tick_seconds: float = 60.0
+    judge_model: str = "gemma4:e4b"
+    judge_interval_seconds: float = 60.0  # 0 以下で能動発話を無効化
+    dialogue_timeout_seconds: float = 180.0
 
     @property
     def db_path(self) -> Path:
@@ -48,4 +51,9 @@ def load_settings() -> Settings:
         data_dir=data_dir,
         history_window=int(os.getenv("ENGAWA_HISTORY_WINDOW", defaults.history_window)),
         state_tick_seconds=float(os.getenv("ENGAWA_STATE_TICK_SECONDS", defaults.state_tick_seconds)),
+        judge_model=os.getenv("ENGAWA_JUDGE_MODEL", defaults.judge_model),
+        judge_interval_seconds=float(os.getenv("ENGAWA_JUDGE_INTERVAL_SECONDS", defaults.judge_interval_seconds)),
+        dialogue_timeout_seconds=float(
+            os.getenv("ENGAWA_DIALOGUE_TIMEOUT_SECONDS", defaults.dialogue_timeout_seconds)
+        ),
     )
