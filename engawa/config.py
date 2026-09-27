@@ -16,6 +16,7 @@ class Settings:
     llm_backend: str = "mock"
     llm_url: str = "http://192.168.0.178:11434"
     llm_model: str = "gemma4:12b"
+    llm_reasoning_effort: str = "none"
     core_host: str = "127.0.0.1"
     core_port: int = 8765
     data_dir: Path = PROJECT_ROOT / "data"
@@ -40,6 +41,7 @@ def load_settings() -> Settings:
         llm_backend=os.getenv("ENGAWA_LLM_BACKEND", defaults.llm_backend),
         llm_url=os.getenv("ENGAWA_LLM_URL", defaults.llm_url).rstrip("/"),
         llm_model=os.getenv("ENGAWA_LLM_MODEL", defaults.llm_model),
+        llm_reasoning_effort=os.getenv("ENGAWA_LLM_REASONING_EFFORT", defaults.llm_reasoning_effort),
         core_host=os.getenv("ENGAWA_CORE_HOST", defaults.core_host),
         core_port=int(os.getenv("ENGAWA_CORE_PORT", defaults.core_port)),
         data_dir=data_dir,

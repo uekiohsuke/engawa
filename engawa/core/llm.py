@@ -30,10 +30,18 @@ class LLMClient(Protocol):
 class OllamaClient:
     """Ollama の /v1/chat/completions を SSE ストリーミングで呼ぶ。"""
 
-    def __init__(self, base_url: str, model: str, temperature: float = 0.7, timeout: float = 120.0):
+    def __init__(
+        self,
+        base_url: str,
+        model: str,
+        reasoning_effort: str = "none",
+        temperature: float = 0.7,
+        timeout: float = 120.0,
+    ):
         self.name = f"ollama:{model}"
         self._base_url = base_url
         self._model = model
+        self._reasoning_effort = reasoning_effort
         self._temperature = temperature
         self._timeout = timeout
 
@@ -44,6 +52,10 @@ class OllamaClient:
             "temperature": self._temperature,
             "stream": True,
         }
+        # 思考対応モデル（gemma4 等）は既定で長い推論を先に生成し、応答開始が数十秒遅れる。
+        # 会話では "none" で思考を切る。空文字ならモデルの既定に任せる。
+        if self._reasoning_effort:
+            payload["reasoning_effort"] = self._reasoning_effort
         async with httpx.AsyncClient(timeout=self._timeout) as client:
             async with client.stream(
                 "POST", f"{self._base_url}/v1/chat/completions", json=payload
@@ -102,7 +114,7 @@ class MockLLMClient:
 
 def create_llm(settings: Settings) -> LLMClient:
     if settings.llm_backend == "ollama":
-        return OllamaClient(settings.llm_url, settings.llm_model)
+        return OllamaClient(settings.llm_url, settings.llm_model, settings.llm_reasoning_effort)
     if settings.llm_backend == "mock":
         return MockLLMClient()
     raise ValueError(f"unknown ENGAWA_LLM_BACKEND: {settings.llm_backend}")
