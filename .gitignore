@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# 仮想環境
+.venv/
+venv/
+
+# ツールキャッシュ
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# 秘密情報・ローカル設定
+.env
+
+# 実行時データ（会話履歴DB・一時ファイル・ログ）
+data/
+tmp/
+*.db
+*.log
+
+# エディタ・OS
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
