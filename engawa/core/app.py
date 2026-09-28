@@ -32,6 +32,11 @@ class NewSession(BaseModel):
     title: str = Field(min_length=1, max_length=40)
 
 
+class ActivityObservation(BaseModel):
+    app: str = Field(min_length=1, max_length=260)
+    title: str = Field(max_length=1000)
+
+
 class SessionPatch(BaseModel):
     title: str | None = Field(default=None, min_length=1, max_length=40)
     archived: bool | None = None
@@ -149,6 +154,11 @@ def create_app(
         if result is None:
             raise HTTPException(409, "distillation is already running")
         return result
+
+    @app.post("/activity", status_code=204)
+    async def post_activity(body: ActivityObservation):
+        """UI が観測した前面ウィンドウ（会話の種の材料）。除外・集中モードの判断は UI 側で済ませてから送られる。"""
+        await memory.record_activity(body.app, body.title)
 
     @app.get("/focus")
     async def get_focus():

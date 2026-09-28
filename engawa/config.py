@@ -30,6 +30,9 @@ class Settings:
     voicevox_path: str = ""  # 空なら自動起動しない（既に動いているエンジンだけを使う）
     voicevox_url: str = "http://127.0.0.1:50021"
     voicevox_speaker: int = 47  # ナースロボ＿タイプＴ（ノーマル）
+    activity_interval_seconds: float = 30.0
+    # 記録しないアプリ（実行ファイル名かウィンドウタイトルに含まれる語。大文字小文字は区別しない）
+    activity_exclude: tuple[str, ...] = ("KeePass", "1Password", "Bitwarden", "パスワード", "Password", "InPrivate")
 
     @property
     def db_path(self) -> Path:
@@ -38,6 +41,12 @@ class Settings:
     @property
     def core_base_url(self) -> str:
         return f"http://{self.core_host}:{self.core_port}"
+
+
+def _split_list(value: str | None, default: tuple[str, ...]) -> tuple[str, ...]:
+    if value is None:
+        return default
+    return tuple(v.strip() for v in value.split(",") if v.strip())
 
 
 def load_settings() -> Settings:
@@ -66,4 +75,8 @@ def load_settings() -> Settings:
         voicevox_path=os.getenv("ENGAWA_VOICEVOX_PATH", defaults.voicevox_path),
         voicevox_url=os.getenv("ENGAWA_VOICEVOX_URL", defaults.voicevox_url).rstrip("/"),
         voicevox_speaker=int(os.getenv("ENGAWA_VOICEVOX_SPEAKER", defaults.voicevox_speaker)),
+        activity_interval_seconds=float(
+            os.getenv("ENGAWA_ACTIVITY_INTERVAL_SECONDS", defaults.activity_interval_seconds)
+        ),
+        activity_exclude=_split_list(os.getenv("ENGAWA_ACTIVITY_EXCLUDE"), defaults.activity_exclude),
     )

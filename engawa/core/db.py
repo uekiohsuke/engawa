@@ -77,6 +77,13 @@ CREATE TABLE IF NOT EXISTS ltm (
     self TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS activity (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    app TEXT NOT NULL,          -- 前面ウィンドウの実行ファイル名
+    title TEXT NOT NULL,        -- 前面ウィンドウのタイトル
+    started_at TEXT NOT NULL,
+    ended_at TEXT NOT NULL      -- 同じウィンドウが続いている間は延長する
+);
 CREATE TABLE IF NOT EXISTS ltm_versions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     character_id TEXT NOT NULL,
@@ -333,6 +340,34 @@ class Database:
             cur = self._conn.execute(
                 "DELETE FROM seeds WHERE character_id = ? AND created_at < ?", (character_id, before)
             )
+        return cur.rowcount
+
+    # --- 画面の活動ログ ---
+
+    def last_activity(self) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute("SELECT * FROM activity ORDER BY id DESC LIMIT 1").fetchone()
+        return dict(row) if row else None
+
+    def add_activity(self, app: str, title: str, at: str) -> int:
+        with self._lock, self._conn:
+            cur = self._conn.execute(
+                "INSERT INTO activity (app, title, started_at, ended_at) VALUES (?, ?, ?, ?)", (app, title, at, at)
+            )
+        return cur.lastrowid
+
+    def extend_activity(self, activity_id: int, ended_at: str) -> None:
+        with self._lock, self._conn:
+            self._conn.execute("UPDATE activity SET ended_at = ? WHERE id = ?", (ended_at, activity_id))
+
+    def list_activity(self, after_id: int = 0) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute("SELECT * FROM activity WHERE id > ? ORDER BY id", (after_id,)).fetchall()
+        return [dict(r) for r in rows]
+
+    def delete_activity_before(self, before: str) -> int:
+        with self._lock, self._conn:
+            cur = self._conn.execute("DELETE FROM activity WHERE ended_at < ?", (before,))
         return cur.rowcount
 
     # --- LTM ---

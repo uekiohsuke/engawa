@@ -7,6 +7,7 @@ import sys
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from engawa.config import load_settings
+from engawa.ui.activity import ActivityWatcher
 from engawa.ui.client import CoreClient
 from engawa.ui.main_window import MainWindow
 from engawa.ui.tts import Speaker, VoicevoxEngine
@@ -39,7 +40,9 @@ def main() -> int:
         def on_sessions(character_id: str, result: list[dict]) -> None:
             sessions[character_id] = result
             if len(sessions) == len(characters):
-                window = MainWindow(client, characters, sessions, speaker)
+                watcher = ActivityWatcher(client, settings.activity_interval_seconds, list(settings.activity_exclude))
+                window = MainWindow(client, characters, sessions, speaker, watcher)
+                watcher.start()
                 state["window"] = window
                 client.connect_events()
                 window.show()

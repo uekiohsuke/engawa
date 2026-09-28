@@ -61,7 +61,7 @@ TRIGGER_LABELS = {
     "boredom": "暇度",
     "fatigue": "疲労の閾値クロス",
     "sleepiness": "就寝前会話の閾値クロス",
-    "memory": "未整理の会話",
+    "memory": "未整理の会話・画面の活動",
 }
 MEMORY_TRIGGER = "memory"
 
@@ -82,6 +82,7 @@ CONVERSATION_COOLDOWN = timedelta(minutes=10)
 PROACTIVE_COOLDOWN = timedelta(minutes=30)  # 返事のない話しかけが続くと倍々に延びる
 MAX_UNANSWERED = 3
 MEMORY_MIN_UNPROCESSED = 4  # 未整理の会話がこれだけ溜まったら、記憶調整のきっかけとして判定層に回す
+MEMORY_MIN_ACTIVITY_MINUTES = 30  # 未整理の画面の活動がこれだけ溜まっても、記憶調整のきっかけにする
 MEMORY_PROBABILITY = 0.5
 
 NEW_SUB_TITLE = "新しい話題"  # 名前が付くまでの仮の名前
@@ -115,6 +116,7 @@ def gate(
     since_proactive: timedelta | None,
     unanswered: int,
     unprocessed: int = 0,
+    unprocessed_activity_minutes: float = 0.0,
 ) -> GateResult:
     """判定層に回す確率を求める。"""
     if availability == AVAILABILITY_SLEEPING:
@@ -123,7 +125,7 @@ def gate(
         return GateResult(blocked="会話した直後")
 
     triggers: dict[str, float] = {}
-    if unprocessed >= MEMORY_MIN_UNPROCESSED:
+    if unprocessed >= MEMORY_MIN_UNPROCESSED or unprocessed_activity_minutes >= MEMORY_MIN_ACTIVITY_MINUTES:
         triggers[MEMORY_TRIGGER] = MEMORY_PROBABILITY
 
     speak_blocked = None
@@ -178,6 +180,7 @@ def build_judge_messages(
     since_conversation: timedelta | None,
     now: datetime,
     unprocessed: int = 0,
+    unprocessed_activity_minutes: float = 0.0,
 ) -> list[dict[str, str]]:
     p = character.personality
     triggers = list(triggers)
@@ -185,7 +188,7 @@ def build_judge_messages(
     allow_memory = MEMORY_TRIGGER in triggers
     actions = [
         *([f'"{ACTION_SPEAK}"（マスターに話しかける）'] if candidates else []),
-        *([f'"{ACTION_MEMORY}"（ひとりで最近の会話を振り返り、記憶を整理する）'] if allow_memory else []),
+        *([f'"{ACTION_MEMORY}"（ひとりで最近の会話やマスターの様子を振り返り、記憶を整理する）'] if allow_memory else []),
         f'"{ACTION_SILENT}"（何もしない）',
     ]
     prompt = "\n".join(
@@ -198,7 +201,7 @@ def build_judge_messages(
             f"- 応答可能状態：{AVAILABILITY_LABELS[availability]}",
             f"- 性格：疲労反応＝{p.fatigue_response}、眠気反応＝{p.sleepiness_response}、暇度感度＝×{p.boredom_sensitivity}",
             f"- 最後にマスターと会話したのは：{_format_elapsed(since_conversation)}",
-            f"- まだ振り返っていない会話：{unprocessed}件",
+            f"- まだ振り返っていない会話：{unprocessed}件、マスターの画面の様子：約{int(unprocessed_activity_minutes)}分ぶん",
             f"- 今回のきっかけ：{'、'.join(TRIGGER_LABELS[t] for t in triggers)}",
             *([f"- 話しかける場合の意図の候補：{'／'.join(f'{i}（{INTENTS[i]}）' for i in candidates)}"] if candidates else []),
             f"- 選べる行動：{'、'.join(actions)}",
@@ -325,6 +328,7 @@ class ProactiveService:
         availability = self._state.availability(character_id)
         since_conversation = self._since(self._db.last_message(character_id), now)
         unprocessed = len(self._memory.unprocessed(character_id)) if self._memory else 0
+        activity_minutes = self._memory.unprocessed_activity_minutes(character_id) if self._memory else 0.0
         times = self._proactive_times[character_id]
         result = gate(
             state=self._state.state(character_id),
@@ -335,10 +339,11 @@ class ProactiveService:
             since_proactive=now - times[-1] if times else None,
             unanswered=self._unanswered(character_id),
             unprocessed=unprocessed,
+            unprocessed_activity_minutes=activity_minutes,
         )
         if force and availability != AVAILABILITY_SLEEPING:
             triggers = {"boredom": BOREDOM_PROBABILITY_SCALE * self._state.state(character_id).boredom**2}
-            if unprocessed:
+            if unprocessed or activity_minutes:
                 triggers[MEMORY_TRIGGER] = MEMORY_PROBABILITY
             result = GateResult(1.0, result.triggers | triggers)
         elif result.blocked or not result.triggers or self._rand() >= result.probability:
@@ -347,7 +352,14 @@ class ProactiveService:
         candidates = candidate_intents(result.triggers)
         allow_memory = MEMORY_TRIGGER in result.triggers
         messages = build_judge_messages(
-            character, self._state.state(character_id), availability, result.triggers, since_conversation, now, unprocessed
+            character,
+            self._state.state(character_id),
+            availability,
+            result.triggers,
+            since_conversation,
+            now,
+            unprocessed,
+            activity_minutes,
         )
         decision = await judge(self._judge_llm, messages, candidates, allow_memory)
         triggers = "、".join(f"{TRIGGER_LABELS[t]} {p:.2f}" for t, p in result.triggers.items())

@@ -94,7 +94,9 @@ class MemoryPanel(QWidget):
 
     def apply(self, memory: dict) -> None:
         rules = memory["rules"]
-        self._summary.setText(f"未整理の会話 {memory['unprocessed']}件　／　STM {len(memory['stm'])}件")
+        self._summary.setText(
+            f"未整理の会話 {memory['unprocessed']}件・画面の活動 {memory['unprocessed_activity']}件　／　STM {len(memory['stm'])}件"
+        )
         self._summary.setToolTip(
             f"STMの期限{rules['stm_ttl_days']}日・蒸留後は1日{rules['stm_keep_per_day']}件まで\n"
             f"会話の種の期限{rules['seed_ttl_days']}日・種があっても{rules['impromptu_probability']:.0%}の確率で即興\n"

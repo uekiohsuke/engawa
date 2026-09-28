@@ -7,7 +7,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QPoint, Qt, Signal
+from PySide6.QtCore import QPoint, QSettings, Qt, Signal
 from PySide6.QtGui import QColor, QKeyEvent
 from PySide6.QtWidgets import (
     QHBoxLayout,
@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from engawa.ui.activity import ActivityWatcher
 from engawa.ui.client import CoreClient
 from engawa.ui.dialogue_window import DialogueWindow
 from engawa.ui.state_window import StateWindow
@@ -32,6 +33,7 @@ from engawa.ui.widgets import COLORS, MessageView
 
 PRESENCE_MARKS = {"both": "🟢", "message_only": "🟡", "sleeping": "🌙"}
 UNREAD_MARK = "●"
+WATCH_SETTING = "activity/enabled"
 
 
 class MessageInput(QPlainTextEdit):
@@ -72,10 +74,12 @@ class MainWindow(QMainWindow):
         characters: list[dict],
         sessions: dict[str, list[dict]],
         speaker: Speaker | None = None,
+        watcher: ActivityWatcher | None = None,
     ):
         super().__init__()
         self._client = client
         self._speaker = speaker
+        self._watcher = watcher
         self._characters = {c["id"]: c for c in characters}
         self._sessions: dict[int, dict] = {s["id"]: s for ss in sessions.values() for s in ss}
         self._current_character: str | None = None
@@ -108,6 +112,18 @@ class MainWindow(QMainWindow):
         character_layout = QVBoxLayout(character_column)
         character_layout.setContentsMargins(0, 0, 0, 8)
         character_layout.addWidget(self._character_list, 1)
+        if watcher is not None:
+            self._watch_button = QPushButton()
+            self._watch_button.setObjectName("focusButton")
+            self._watch_button.setCheckable(True)
+            self._watch_button.setToolTip(
+                "前面のウィンドウのタイトルとアプリ名を、会話の種の材料にする\n"
+                "（集中モード中・除外アプリ・縁側自身のウィンドウは記録しない）"
+            )
+            self._watch_button.toggled.connect(self._set_watching)
+            self._watch_button.setChecked(QSettings().value(WATCH_SETTING, True, type=bool))
+            self._set_watching(self._watch_button.isChecked())
+            character_layout.addWidget(self._watch_button, alignment=Qt.AlignmentFlag.AlignHCenter)
         character_layout.addWidget(self._focus_button, alignment=Qt.AlignmentFlag.AlignHCenter)
         character_layout.addWidget(self._state_button, alignment=Qt.AlignmentFlag.AlignHCenter)
 
@@ -340,6 +356,15 @@ class MainWindow(QMainWindow):
     def _set_focus_button(self, enabled: bool) -> None:
         self._focus_button.setChecked(enabled)
         self._focus_button.setText(f"集中モード：{'ON' if enabled else 'OFF'}")
+        if self._watcher is not None:
+            self._watcher.focus_mode = enabled  # 集中モード中は画面を見ない
+
+    # --- 画面を見る（会話の種の材料） ---
+
+    def _set_watching(self, enabled: bool) -> None:
+        self._watch_button.setText(f"画面を見る：{'ON' if enabled else 'OFF'}")
+        QSettings().setValue(WATCH_SETTING, enabled)
+        self._watcher.enabled = enabled
 
     def _toggle_focus(self) -> None:
         enabled = self._focus_button.isChecked()

@@ -39,6 +39,11 @@ RETRIEVE_MIN_SIMILARITY = 0.55  # bge-m3 で関連する発言と無関係な発
 MAX_SEEDS_PER_ADJUST = 3
 MAX_SELF_PER_ADJUST = 2
 ADJUST_CONTEXT_MESSAGES = 40
+ADJUST_CONTEXT_ACTIVITY = 30
+ACTIVITY_TTL = timedelta(days=3)
+ACTIVITY_MERGE_GAP = timedelta(minutes=2)  # 観測の間隔がこれ以内なら同じ活動として続ける
+ACTIVITY_MIN_MINUTES = 1.0  # 記憶調整に渡すのは、これ以上続いた活動だけ（ちらっと切り替えただけのものは除く）
+ACTIVITY_TITLE_MAX = 120
 
 # マスターの性別は決めていないので、LLMに推測させない
 NO_PRONOUN_RULE = "マスターのことは「マスター」と書き、「彼」「彼女」などの三人称の代名詞は使わないこと。"
@@ -66,6 +71,18 @@ def cosine(a: list[float], b: list[float]) -> float:
 def _stamp(iso: str) -> str:
     t = datetime.fromisoformat(iso).astimezone()
     return f"{t.month}/{t.day} {t:%H:%M}"
+
+
+def activity_minutes(activity: dict[str, Any]) -> float:
+    started = datetime.fromisoformat(activity["started_at"])
+    ended = datetime.fromisoformat(activity["ended_at"])
+    return (ended - started).total_seconds() / 60
+
+
+def format_activity_line(activity: dict[str, Any]) -> str:
+    started = datetime.fromisoformat(activity["started_at"]).astimezone()
+    ended = datetime.fromisoformat(activity["ended_at"]).astimezone()
+    return f"[{started.month}/{started.day} {started:%H:%M}〜{ended:%H:%M}] {activity['app']} — {activity['title']}"
 
 
 def format_stm_line(item: dict[str, Any], character_name: str) -> str:
@@ -213,6 +230,34 @@ class MemoryService:
         self._db.mark_seed_used(seed_id, self._now().isoformat())
         await self._publish(character_id)
 
+    # --- 画面の活動ログ（会話の種の材料。仕様3章） ---
+
+    async def record_activity(self, app: str, title: str) -> None:
+        """前面ウィンドウの観測を記録する。同じウィンドウが続いている間は1件にまとめて終了時刻を延ばす。"""
+        now = self._now()
+        title = title[:ACTIVITY_TITLE_MAX]
+        last = self._db.last_activity()
+        if (
+            last
+            and (last["app"], last["title"]) == (app, title)
+            and now - datetime.fromisoformat(last["ended_at"]) <= ACTIVITY_MERGE_GAP
+        ):
+            self._db.extend_activity(last["id"], now.isoformat())
+        else:
+            self._db.add_activity(app, title, now.isoformat())
+
+    def _activity_cursor_key(self, character_id: str) -> str:
+        return f"activity_cursor:{character_id}"
+
+    def unprocessed_activity(self, character_id: str) -> list[dict[str, Any]]:
+        """前回の記憶調整以降の活動ログ（期限内のもの）。"""
+        cursor = self._db.get_setting(self._activity_cursor_key(character_id), 0)
+        since = (self._now() - ACTIVITY_TTL).isoformat()
+        return [a for a in self._db.list_activity(after_id=cursor) if a["ended_at"] >= since]
+
+    def unprocessed_activity_minutes(self, character_id: str) -> float:
+        return sum(activity_minutes(a) for a in self.unprocessed_activity(character_id))
+
     # --- 記憶調整 ---
 
     def _cursor_key(self, character_id: str) -> str:
@@ -226,6 +271,8 @@ class MemoryService:
     def build_adjust_messages(self, character: Character) -> list[dict[str, str]]:
         now = self._now()
         conversation = self.unprocessed(character.id)[-ADJUST_CONTEXT_MESSAGES:]
+        activity = [a for a in self.unprocessed_activity(character.id) if activity_minutes(a) >= ACTIVITY_MIN_MINUTES]
+        activity = activity[-ADJUST_CONTEXT_ACTIVITY:]
         seeds = self._db.list_seeds(character.id, since=(now - SEED_TTL).isoformat(), unused_only=True)
         selves = [s for s in self._db.list_stm(character.id) if s["kind"] == KIND_SELF][-10:]
         ltm = self.ltm_section(character.id)
@@ -233,9 +280,13 @@ class MemoryService:
             [
                 f"{ADJUST_PREFIX}あなたはキャラクター「{character.name}」の記憶を整理する係です。",
                 f"{character.name}はマスター（ユーザー）のデスクトップに住む隣人で、今は会話していない、ひとりの時間です。",
-                "最近の会話を振り返って、次の2種類の記憶を作ってください。",
+                "最近の会話と、隣から見えていたマスターの画面の様子を振り返って、次の2種類の記憶を作ってください。",
                 "1. 会話の種：あとで自分からマスターに振ってみたい話題や、会話の中で気になった疑問。"
-                "具体的に、20〜60字で。既存の種と重複しないこと。無ければ空でよい。",
+                "具体的に、20〜60字で。既存の種と重複しないこと。無ければ空でよい。"
+                "画面の様子から作る場合は、隣でちらっと見えた程度の自然な興味にとどめ、見張っているような話題にしないこと。"
+                "行動を順に並べた実況や要約ではなく、1つの物事に興味を持った「話題」や「質問」の形にする"
+                "（例：「ホットサンド、作ってみるの？」はよいが、「勉強の後に動画を見てゲームをしていた」のような行動の要約や、"
+                "「〇時から〇時まで何をしていたか」の追及はしない）。",
                 f"2. 自己言及記憶：今マスターに対してどう思っているか、あるいは自分の生活の中で今日なんとなく思ったこと。"
                 f"{character.name}の一人称で、20〜80字で。生活の出来事は具体的に作り込まず、ぼんやりとした輪郭だけにすること。"
                 "「今の調子」（だるい・眠い等）は書かないこと。",
@@ -245,7 +296,10 @@ class MemoryService:
                 f"- 現在時刻：{now:%m/%d %H:%M}",
                 "",
                 "### 最近の会話",
-                *(format_stm_line(s, character.name) for s in conversation),
+                *([format_stm_line(s, character.name) for s in conversation] or ["（無し）"]),
+                "",
+                "### 最近のマスターの画面の様子（前面にあったウィンドウ）",
+                *([format_activity_line(a) for a in activity] or ["（無し）"]),
                 "",
                 "### 既存の会話の種",
                 *([f"{s['id']}. {s['content']}" for s in seeds] or ["（無し）"]),
@@ -264,6 +318,7 @@ class MemoryService:
         """記憶調整：会話の種と自己言及記憶を作る。"""
         character = self._characters[character_id]
         pending = self.unprocessed(character_id)
+        pending_activity = self.unprocessed_activity(character_id)
         data = await self._llm.complete_json(self.build_adjust_messages(character))
         now = self._now().isoformat()
 
@@ -281,11 +336,20 @@ class MemoryService:
 
         if pending:
             self._db.set_setting(self._cursor_key(character_id), pending[-1]["id"])
-        result = {"seeds": seeds, "dropped_seeds": drop, "self_memories": selves, "processed": len(pending)}
+        if pending_activity:
+            self._db.set_setting(self._activity_cursor_key(character_id), pending_activity[-1]["id"])
+        result = {
+            "seeds": seeds,
+            "dropped_seeds": drop,
+            "self_memories": selves,
+            "processed": len(pending),
+            "processed_activity": len(pending_activity),
+        }
         await self._state.record(
             character_id,
             "memory",
-            f"記憶調整：会話{len(pending)}件を整理（種 +{len(seeds)}／-{len(drop)}、自己言及 +{len(selves)}）",
+            f"記憶調整：会話{len(pending)}件・画面の活動{len(pending_activity)}件を整理"
+            f"（種 +{len(seeds)}／-{len(drop)}、自己言及 +{len(selves)}）",
         )
         await self._publish(character_id)
         return result
@@ -358,6 +422,7 @@ class MemoryService:
         result: dict[str, Any] = {
             "expired_stm": self._db.delete_stm_before(character_id, (now - STM_TTL).isoformat()),
             "expired_seeds": self._db.delete_seeds_before(character_id, (now - SEED_TTL).isoformat()),
+            "expired_activity": self._db.delete_activity_before((now - ACTIVITY_TTL).isoformat()),
             "ltm_chars": None,
         }
         # 入力は記録として残っているSTM全件（前日以前から残っているものも含む）
@@ -405,6 +470,7 @@ class MemoryService:
                 for s in reversed(stm)
             ],
             "unprocessed": len(self.unprocessed(character_id)),
+            "unprocessed_activity": len(self.unprocessed_activity(character_id)),
             "rules": {
                 "stm_ttl_days": STM_TTL.days,
                 "stm_keep_per_day": STM_KEEP_PER_DAY,
