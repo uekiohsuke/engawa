@@ -11,7 +11,7 @@ from engawa.characters import Character
 from engawa.core.db import Database
 from engawa.core.events import EventHub
 from engawa.core.llm import INSTRUCTION_PREFIX, ChatMessage, LLMClient
-from engawa.core.memory import STM_SESSION_KINDS, MemoryService
+from engawa.core.memory import RECALL_SESSION_KINDS, MemoryService
 from engawa.core.state_service import StateService
 
 log = logging.getLogger(__name__)
@@ -24,6 +24,7 @@ class SessionBusyError(Exception):
 
 
 FAREWELL_WINDOW = timedelta(minutes=15)
+SUB_ARCHIVE_AFTER = timedelta(days=3)
 
 
 def asleep_notice(character: Character) -> str:
@@ -60,6 +61,34 @@ class ConversationService:
     def is_busy(self, session_id: int) -> bool:
         return session_id in self._busy
 
+    # --- サブスレッド（サブチャンネル） ---
+
+    async def create_sub_session(self, character_id: str, title: str) -> dict[str, Any]:
+        session = self._db.create_session(character_id, "sub", title, self._state.now().isoformat())
+        await self._hub.publish("session.created", session=session)
+        return session
+
+    async def update_session(self, session_id: int, *, title: str | None = None, archived: bool | None = None) -> dict[str, Any]:
+        self._db.update_session(session_id, title=title, archived=archived)
+        session = self._db.get_session(session_id)
+        await self._hub.publish("session.updated", session=session)
+        return session
+
+    async def archive_stale_sessions(self, character_id: str) -> int:
+        """最後の発言から一定期間たったサブスレッドを一覧から隠す（削除はしない）。"""
+        now = self._state.now()
+        archived = 0
+        for session in self._db.list_sessions(character_id):
+            if session["kind"] != "sub" or session["archived"]:
+                continue
+            last = max(
+                datetime.fromisoformat(t) for t in (session["created_at"], session["last_message_at"]) if t
+            )
+            if now - last >= SUB_ARCHIVE_AFTER:
+                await self.update_session(session["id"], archived=True)
+                archived += 1
+        return archived
+
     def build_system_prompt(self, character: Character, related: list[dict[str, Any]] | None = None) -> str:
         sections = [character.system_prompt()]
         if self._memory:
@@ -94,6 +123,8 @@ class ConversationService:
         if session_id in self._busy:
             raise SessionBusyError(session_id)
         self._busy.add(session_id)
+        if self._db.get_session(session_id)["archived"]:
+            await self.update_session(session_id, archived=False)  # アーカイブ済みのチャンネルで話したら戻す
         message = self._add_message(session_id, "user", content)
         await self._hub.publish("message.created", message=message)
         was_asleep = self._state.state(character.id).asleep
@@ -144,8 +175,7 @@ class ConversationService:
         self, character: Character, session_id: int, message: dict[str, Any], embedding: list[float] | None = None
     ) -> None:
         if self._memory:
-            kind = self._db.get_session(session_id)["kind"]
-            await self._memory.record_message(character.id, message, kind, embedding)
+            await self._memory.record_message(character.id, message, embedding)
 
     async def _recall(
         self, character: Character, session_id: int, query: dict[str, Any] | None
@@ -153,8 +183,8 @@ class ConversationService:
         """query（ユーザー発言や会話の種）に関連するSTMを探す。ユーザー発言ならSTMへの登録もここで行う。"""
         if not self._memory or query is None:
             return []
-        # サブスレッドは STM を参照しない（仕様4-1）
-        uses_stm = self._db.get_session(session_id)["kind"] in STM_SESSION_KINDS
+        # サブスレッドは STM を参照しない（仕様4-1）。発言の記録は行う
+        uses_stm = self._db.get_session(session_id)["kind"] in RECALL_SESSION_KINDS
         vector = await self._memory.embed_query(query["content"]) if uses_stm else None
         if query.get("id"):  # ユーザー発言
             await self._remember(character, session_id, query, vector)

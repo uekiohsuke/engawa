@@ -10,7 +10,7 @@ from engawa.core.app import create_app
 from engawa.core.conversation import ConversationService, should_say_goodnight
 from engawa.core.db import Database
 from engawa.core.events import EventHub
-from engawa.core.llm import INSTRUCTION_PREFIX, MockLLMClient
+from engawa.core.llm import INSTRUCTION_PREFIX, TITLE_PREFIX, MockLLMClient
 from engawa.core.proactive import (
     FAREWELL,
     ProactiveService,
@@ -54,6 +54,8 @@ class FakeJudge(MockLLMClient):
         self.calls = 0
 
     async def complete_json(self, messages):
+        if messages and messages[-1]["content"].startswith(TITLE_PREFIX):
+            return {"title": "テストの話題"}  # チャンネル名付けは判定の回数に数えない
         self.calls += 1
         if isinstance(self.response, Exception):
             raise self.response
@@ -89,6 +91,9 @@ class Env:
 
     def messages(self, kind: str) -> list[dict]:
         return self.db.recent_messages(self.sessions[kind], 100)
+
+    def subs(self) -> list[dict]:
+        return [s for s in self.db.list_sessions("sui") if s["kind"] == "sub"]
 
     async def settle(self) -> None:
         """バックグラウンドの生成・送り直しを待つ。"""
@@ -185,7 +190,11 @@ async def test_speaks_in_dialogue_then_falls_back_to_message(tmp_path):
     assert spoken["role"] == "character"
 
     await env.settle()  # 返事がないまま対話のタイムアウトを過ぎる
-    [resent] = env.messages("main")
+    # 会話の種を使っていない（即興）ので、新しいサブチャンネルに送り直す
+    assert env.messages("main") == []
+    [sub] = env.subs()
+    assert sub["title"] == "テストの話題"
+    [resent] = env.db.recent_messages(sub["id"], 10)
     assert resent["content"] == spoken["content"]
     assert env.hub.of("dialogue.fallback")
 
@@ -199,17 +208,21 @@ async def test_no_fallback_when_user_replies(tmp_path):
     await env.proactive.evaluate("sui")
     await env.conversation.post_user_message(SUI, env.sessions["dialogue"], "なに？")
     await env.settle()
-    assert env.messages("main") == []
+    assert env.messages("main") == [] and env.subs() == []
     assert not env.hub.of("dialogue.fallback")
 
 
-async def test_message_only_speaks_in_main(tmp_path):
+async def test_message_only_impromptu_goes_to_new_sub(tmp_path):
     env = Env(tmp_path, at(15), boredom=0.8)  # 14〜17時は取り込み中
     await env.proactive.evaluate("sui")
     await env.settle()
-    assert env.hub.of("proactive.started")[0]["mode"] == "message"
-    assert len(env.messages("main")) == 1
-    assert env.messages("dialogue") == []
+    [sub] = env.subs()
+    started = env.hub.of("proactive.started")[0]
+    assert started["mode"] == "message" and started["session_id"] == sub["id"]
+    assert env.hub.of("session.created")[0]["session"]["title"] == "新しい話題"  # 名前が付く前の仮の名前
+    assert sub["title"] == "テストの話題"
+    assert len(env.db.recent_messages(sub["id"], 10)) == 1
+    assert env.messages("main") == [] and env.messages("dialogue") == []
 
 
 async def test_focus_mode_forces_message(tmp_path):
@@ -218,7 +231,7 @@ async def test_focus_mode_forces_message(tmp_path):
     assert env.state.availability("sui") == "message_only"
     await env.proactive.evaluate("sui")
     await env.settle()
-    assert len(env.messages("main")) == 1
+    assert len(env.subs()) == 1
     assert env.messages("dialogue") == []
 
 

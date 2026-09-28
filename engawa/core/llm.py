@@ -26,6 +26,7 @@ INSTRUCTION_PREFIX = "【指示】"
 JUDGE_PREFIX = "【判定】"
 ADJUST_PREFIX = "【記憶調整】"
 DISTILL_PREFIX = "【蒸留】"
+TITLE_PREFIX = "【題名】"
 
 
 class LLMClient(Protocol):
@@ -141,6 +142,8 @@ class MockLLMClient:
             return {"seeds": ["(mock) この前の話の続きを聞いてみる"], "drop_seeds": [], "self_memories": ["(mock) マスターと話すのは楽しい"]}
         if prompt.startswith(DISTILL_PREFIX):
             return {"conversation": "(mock) マスターとよく話した。", "self": "(mock) 今日も隣にいた。"}
+        if prompt.startswith(TITLE_PREFIX):
+            return {"title": "(mock) 話題"}
         return {"action": "speak", "intent": "", "reason": "(mock) 常に話しかける"}
 
     async def ping(self) -> bool:

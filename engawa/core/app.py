@@ -28,6 +28,15 @@ class FocusMode(BaseModel):
     enabled: bool
 
 
+class NewSession(BaseModel):
+    title: str = Field(min_length=1, max_length=40)
+
+
+class SessionPatch(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=40)
+    archived: bool | None = None
+
+
 def create_app(
     settings: Settings | None = None,
     llm: LLMClient | None = None,
@@ -63,6 +72,7 @@ def create_app(
     async def lifespan(_: FastAPI):
         for character_id in CHARACTERS:
             db.ensure_default_sessions(character_id)
+            await conversation.archive_stale_sessions(character_id)
         await state.start()
         await proactive.start()
         yield
@@ -148,6 +158,22 @@ def create_app(
     async def put_focus(body: FocusMode):
         await state.set_focus_mode(body.enabled)
         return {"enabled": state.focus_mode}
+
+    @app.post("/characters/{character_id}/sessions", status_code=201)
+    async def create_session(character_id: str, body: NewSession):
+        """ユーザーからサブスレッド（サブチャンネル）を立てる。"""
+        require_character(character_id)
+        return await conversation.create_sub_session(character_id, body.title.strip())
+
+    @app.patch("/sessions/{session_id}")
+    async def patch_session(session_id: int, body: SessionPatch):
+        """サブスレッドの名前変更・アーカイブ。対話とメインスレッドは変更できない。"""
+        session = require_session(session_id)
+        if session["kind"] != "sub":
+            raise HTTPException(400, "only sub sessions can be changed")
+        return await conversation.update_session(
+            session_id, title=body.title.strip() if body.title else None, archived=body.archived
+        )
 
     @app.get("/sessions/{session_id}/messages")
     async def list_messages(session_id: int, limit: int = 100):

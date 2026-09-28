@@ -12,8 +12,8 @@
         ↓
   対話で一定時間返事がなければ、同じ内容を #main にメッセージとして送り直す
 
-眠りに落ちたら（会話中ならおやすみを言ってから）夜間蒸留を行う。
-即興の発話もサブスレッドではなく当面 #main に送る（仕様4-1の例外。サブスレッドは次段階）。
+メッセージの送り先は、会話の種を使ったら #main、即興なら新しいサブスレッド（仕様4-1）。
+眠りに落ちたら（会話中ならおやすみを言ってから）、放置されたサブスレッドのアーカイブと夜間蒸留を行う。
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ from engawa.characters import Character, Personality
 from engawa.core.conversation import ConversationService, should_say_goodnight
 from engawa.core.db import Database
 from engawa.core.events import EventHub
-from engawa.core.llm import JUDGE_PREFIX, LLMClient
+from engawa.core.llm import JUDGE_PREFIX, TITLE_PREFIX, LLMClient
 from engawa.core.memory import MemoryService
 from engawa.core.state import (
     AVAILABILITY_BOTH,
@@ -83,6 +83,9 @@ PROACTIVE_COOLDOWN = timedelta(minutes=30)  # 返事のない話しかけが続�
 MAX_UNANSWERED = 3
 MEMORY_MIN_UNPROCESSED = 4  # 未整理の会話がこれだけ溜まったら、記憶調整のきっかけとして判定層に回す
 MEMORY_PROBABILITY = 0.5
+
+NEW_SUB_TITLE = "新しい話題"  # 名前が付くまでの仮の名前
+SUB_TITLE_MAX = 16
 
 FAREWELL = "おやすみ"
 FAREWELL_INSTRUCTION = (
@@ -366,6 +369,25 @@ class ProactiveService:
     def _session_id(self, character_id: str, kind: str) -> int:
         return next(s["id"] for s in self._db.list_sessions(character_id) if s["kind"] == kind)
 
+    async def _new_sub_session(self, character_id: str) -> int:
+        session = await self._conversation.create_sub_session(character_id, NEW_SUB_TITLE)
+        return session["id"]
+
+    async def _name_sub_session(self, session_id: int, content: str) -> None:
+        """話しかけの内容から、サブチャンネルの名前を判定層のモデルに付けさせる。"""
+        prompt = (
+            f"{TITLE_PREFIX}次の話しかけの話題を表す、チャット用のチャンネル名を{SUB_TITLE_MAX}字以内で付けてください。"
+            f"記号や絵文字は使わない。\n\n話しかけ：{content}\n\n"
+            'JSONのみで答えること：{"title": "チャンネル名"}'
+        )
+        try:
+            data = await self._judge_llm.complete_json([{"role": "user", "content": prompt}])
+            title = str(data.get("title") or "").strip()
+        except Exception:
+            log.exception("naming sub session failed")
+            title = ""
+        await self._conversation.update_session(session_id, title=(title or content)[:SUB_TITLE_MAX])
+
     async def speak(
         self,
         character_id: str,
@@ -373,17 +395,25 @@ class ProactiveService:
         since_conversation: timedelta | None = None,
         session_id: int | None = None,
     ) -> dict[str, Any] | None:
-        """話しかける。session_id を省略すると応答可能状態に応じて対話かメッセージかを選ぶ。"""
-        character = self._characters[character_id]
-        if session_id is None:
-            kind = "dialogue" if self._state.availability(character_id) == AVAILABILITY_BOTH else "main"
-            session_id = self._session_id(character_id, kind)
-        else:
-            kind = self._db.get_session(session_id)["kind"]
-        mode = "dialogue" if kind == "dialogue" else "message"
+        """話しかける。session_id を省略すると送り先を選ぶ：
 
+        - 両方対応できる → 対話
+        - それ以外（メッセージ）→ 会話の種を使うなら #main、即興なら新しいサブスレッド（仕様4-1）
+        """
+        character = self._characters[character_id]
         # 会話の種を1つ選ぶ（仕様6-4：選ぶのはコード）。無ければ即興
         seed = self._memory.pick_seed(character_id) if self._memory and intent != FAREWELL else None
+        new_sub = False
+        if session_id is None:
+            if self._state.availability(character_id) == AVAILABILITY_BOTH:
+                session_id = self._session_id(character_id, "dialogue")
+            elif seed:
+                session_id = self._session_id(character_id, "main")
+            else:
+                session_id = await self._new_sub_session(character_id)
+                new_sub = True
+        mode = "dialogue" if self._db.get_session(session_id)["kind"] == "dialogue" else "message"
+
         await self._hub.publish(
             "proactive.started", character_id=character_id, session_id=session_id, mode=mode, intent=intent
         )
@@ -396,6 +426,8 @@ class ProactiveService:
         )
         if message is None:
             return None
+        if new_sub:
+            await self._name_sub_session(session_id, message["content"])
 
         self._proactive_times[character_id].append(self._state.now())
         if seed:
@@ -409,17 +441,29 @@ class ProactiveService:
             f"{'対話' if mode == 'dialogue' else 'メッセージ'}で話しかけた（{intent}{'' if intent == FAREWELL else topic}）",
         )
         if mode == "dialogue" and intent != FAREWELL:
-            self._spawn(self._fallback_if_unanswered(character_id, session_id, message))
+            self._spawn(self._fallback_if_unanswered(character_id, session_id, message, used_seed=seed is not None))
         return message
 
-    async def _fallback_if_unanswered(self, character_id: str, session_id: int, message: dict[str, Any]) -> None:
-        """対話で話しかけて返事がなければ、同じ内容をメッセージとして送り直す（仕様4-1）。"""
+    async def _fallback_if_unanswered(
+        self, character_id: str, session_id: int, message: dict[str, Any], used_seed: bool
+    ) -> None:
+        """対話で話しかけて返事がなければ、同じ内容をメッセージとして送り直す（仕様4-1）。
+
+        送り先はメッセージの能動発話と同じ基準：会話の種を使っていたら #main、即興なら新しいサブスレッド。
+        """
         await asyncio.sleep(self._dialogue_timeout)
         if self._db.has_user_message_after(session_id, message["id"]):
             return
-        await self._conversation.post_character_message(self._session_id(character_id, "main"), message["content"])
+        if used_seed:
+            target = self._session_id(character_id, "main")
+        else:
+            target = await self._new_sub_session(character_id)
+        await self._conversation.post_character_message(target, message["content"])
+        if not used_seed:
+            await self._name_sub_session(target, message["content"])
         await self._hub.publish("dialogue.fallback", character_id=character_id, session_id=session_id)
-        await self._state.record(character_id, "proactive", "対話に返事がなかったので、メッセージで送り直した")
+        where = "#main" if used_seed else "新しいサブチャンネル"
+        await self._state.record(character_id, "proactive", f"対話に返事がなかったので、{where}に送り直した")
 
     # --- 状態イベント ---
 
@@ -437,6 +481,7 @@ class ProactiveService:
         if should_say_goodnight(datetime.fromisoformat(sleep.at), last_user_at):
             # 会話中に眠りに落ちるときは、判定層を通さずにおやすみを言って切り上げる（仕様6-3）
             await self.speak(character_id, FAREWELL, session_id=last_user["session_id"])
+        await self._conversation.archive_stale_sessions(character_id)
         if self._memory:
             # 睡眠中に夜間蒸留（仕様8-2）。おやすみの一言も含めるため、その後に行う
             try:

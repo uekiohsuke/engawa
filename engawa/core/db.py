@@ -24,7 +24,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     character_id TEXT NOT NULL,
     kind TEXT NOT NULL,
     title TEXT NOT NULL,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    archived INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -99,6 +100,14 @@ class Database:
         self._lock = threading.Lock()
         with self._lock:
             self._conn.executescript(SCHEMA)
+            self._migrate()
+
+    def _migrate(self) -> None:
+        """既存のDBに、後から追加した列を足す。"""
+        columns = {r["name"] for r in self._conn.execute("PRAGMA table_info(sessions)")}
+        if "archived" not in columns:
+            self._conn.execute("ALTER TABLE sessions ADD COLUMN archived INTEGER NOT NULL DEFAULT 0")
+            self._conn.commit()
 
     def close(self) -> None:
         self._conn.close()
@@ -117,17 +126,37 @@ class Database:
                         (character_id, kind, title, _now()),
                     )
 
+    _SESSION_SELECT = (
+        "SELECT s.*, (SELECT MAX(m.created_at) FROM messages m WHERE m.session_id = s.id) AS last_message_at "
+        "FROM sessions s"
+    )
+
     def list_sessions(self, character_id: str) -> list[dict[str, Any]]:
         with self._lock:
             rows = self._conn.execute(
-                "SELECT * FROM sessions WHERE character_id = ? ORDER BY id", (character_id,)
+                f"{self._SESSION_SELECT} WHERE s.character_id = ? ORDER BY s.id", (character_id,)
             ).fetchall()
         return [dict(r) for r in rows]
 
     def get_session(self, session_id: int) -> dict[str, Any] | None:
         with self._lock:
-            row = self._conn.execute("SELECT * FROM sessions WHERE id = ?", (session_id,)).fetchone()
+            row = self._conn.execute(f"{self._SESSION_SELECT} WHERE s.id = ?", (session_id,)).fetchone()
         return dict(row) if row else None
+
+    def create_session(self, character_id: str, kind: str, title: str, created_at: str) -> dict[str, Any]:
+        with self._lock, self._conn:
+            cur = self._conn.execute(
+                "INSERT INTO sessions (character_id, kind, title, created_at) VALUES (?, ?, ?, ?)",
+                (character_id, kind, title, created_at),
+            )
+        return self.get_session(cur.lastrowid)
+
+    def update_session(self, session_id: int, *, title: str | None = None, archived: bool | None = None) -> None:
+        with self._lock, self._conn:
+            if title is not None:
+                self._conn.execute("UPDATE sessions SET title = ? WHERE id = ?", (title, session_id))
+            if archived is not None:
+                self._conn.execute("UPDATE sessions SET archived = ? WHERE id = ?", (int(archived), session_id))
 
     def add_message(self, session_id: int, role: str, content: str, created_at: str | None = None) -> dict[str, Any]:
         created_at = created_at or _now()

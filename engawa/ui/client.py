@@ -56,6 +56,15 @@ class CoreClient(QObject):
     ) -> None:
         self._send_json("PUT", path, body, on_success, on_error)
 
+    def patch(
+        self,
+        path: str,
+        body: dict[str, Any],
+        on_success: JsonCallback | None = None,
+        on_error: ErrorCallback | None = None,
+    ) -> None:
+        self._send_json("PATCH", path, body, on_success, on_error)
+
     def _send_json(
         self,
         method: str,
@@ -67,7 +76,12 @@ class CoreClient(QObject):
         request = QNetworkRequest(QUrl(self._base_url + path))
         request.setHeader(QNetworkRequest.KnownHeaders.ContentTypeHeader, "application/json")
         data = json.dumps(body).encode("utf-8")
-        reply = self._nam.post(request, data) if method == "POST" else self._nam.put(request, data)
+        if method == "POST":
+            reply = self._nam.post(request, data)
+        elif method == "PUT":
+            reply = self._nam.put(request, data)
+        else:
+            reply = self._nam.sendCustomRequest(request, method.encode("ascii"), data)
         reply.finished.connect(lambda: self._handle_reply(reply, on_success, on_error))
 
     def _handle_reply(self, reply: QNetworkReply, on_success: JsonCallback | None, on_error: ErrorCallback | None) -> None:

@@ -1,20 +1,22 @@
 """チャットアプリ本体（Discord 風）。
 
 左：キャラクター一覧（フレンド一覧）。ダブルクリックで対話ウィンドウを開く（仕様5章）。
-中：チャンネル一覧（メッセージのメイン／サブスレッド。今回は #main のみ）。
+中：チャンネル一覧。#main（メインスレッド）と、話題ごとのサブチャンネル（サブスレッド）。
 右：メッセージ欄と入力欄。
 """
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QKeyEvent
+from PySide6.QtCore import QPoint, Qt, Signal
+from PySide6.QtGui import QColor, QKeyEvent
 from PySide6.QtWidgets import (
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QListWidget,
     QListWidgetItem,
     QMainWindow,
+    QMenu,
     QPlainTextEdit,
     QPushButton,
     QSplitter,
@@ -25,10 +27,10 @@ from PySide6.QtWidgets import (
 from engawa.ui.client import CoreClient
 from engawa.ui.dialogue_window import DialogueWindow
 from engawa.ui.state_window import StateWindow
-from engawa.ui.widgets import MessageView
+from engawa.ui.widgets import COLORS, MessageView
 
-CHANNEL_KINDS = ("main", "sub")
 PRESENCE_MARKS = {"both": "🟢", "message_only": "🟡", "sleeping": "🌙"}
+UNREAD_MARK = "●"
 
 
 class MessageInput(QPlainTextEdit):
@@ -67,10 +69,12 @@ class MainWindow(QMainWindow):
         super().__init__()
         self._client = client
         self._characters = {c["id"]: c for c in characters}
-        self._sessions = sessions
+        self._sessions: dict[int, dict] = {s["id"]: s for ss in sessions.values() for s in ss}
         self._current_character: str | None = None
         self._current_session: dict | None = None
         self._busy_sessions: set[int] = set()
+        self._unread: set[int] = set()
+        self._show_archived = False
         self._dialogue_windows: dict[str, DialogueWindow] = {}
         self._state_windows: dict[str, StateWindow] = {}
         self._character_items: dict[str, QListWidgetItem] = {}
@@ -101,6 +105,22 @@ class MainWindow(QMainWindow):
 
         self._channel_list = QListWidget()
         self._channel_list.currentItemChanged.connect(self._on_channel_selected)
+        self._channel_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._channel_list.customContextMenuRequested.connect(self._channel_menu)
+        new_channel_button = QPushButton("＋ 新しい話題")
+        new_channel_button.setToolTip("サブチャンネルを立てる（サブチャンネルでは長期記憶だけを参照する）")
+        new_channel_button.clicked.connect(self._new_channel)
+        self._archived_button = QPushButton("アーカイブを表示")
+        self._archived_button.setObjectName("focusButton")
+        self._archived_button.setCheckable(True)
+        self._archived_button.setToolTip("3日間発言のないサブチャンネルは自動でアーカイブされる")
+        self._archived_button.clicked.connect(self._toggle_archived)
+        channel_column = QWidget()
+        channel_layout = QVBoxLayout(channel_column)
+        channel_layout.setContentsMargins(0, 0, 0, 8)
+        channel_layout.addWidget(self._channel_list, 1)
+        channel_layout.addWidget(new_channel_button, alignment=Qt.AlignmentFlag.AlignHCenter)
+        channel_layout.addWidget(self._archived_button, alignment=Qt.AlignmentFlag.AlignHCenter)
 
         self._chat_header = QLabel()
         self._chat_header.setObjectName("chatHeader")
@@ -127,7 +147,7 @@ class MainWindow(QMainWindow):
         splitter = QSplitter()
         splitter.setHandleWidth(1)
         splitter.addWidget(_pane("characterPane", "キャラクター", character_column))
-        splitter.addWidget(_pane("channelPane", "チャンネル", self._channel_list))
+        splitter.addWidget(_pane("channelPane", "チャンネル", channel_column))
         splitter.addWidget(chat_pane)
         splitter.setSizes([180, 200, 620])
         splitter.setStretchFactor(2, 1)
@@ -154,24 +174,120 @@ class MainWindow(QMainWindow):
             return
         self._current_character = item.data(Qt.ItemDataRole.UserRole)
         self._message_view.set_character_name(self._characters[self._current_character]["name"])
+        self._current_session = None
+        self._render_channels()
+
+    def _session_of_kind(self, character_id: str, kind: str) -> dict:
+        return next(s for s in self._sessions.values() if s["character_id"] == character_id and s["kind"] == kind)
+
+    def _render_channels(self, select_id: int | None = None) -> None:
+        """チャンネル一覧を描き直す。#main、サブチャンネル（新しい順）、アーカイブ（表示時のみ）の順。"""
+        if self._current_character is None:
+            return
+        select_id = select_id or (self._current_session["id"] if self._current_session else None)
+        subs = [s for s in self._sessions.values() if s["character_id"] == self._current_character and s["kind"] == "sub"]
+        subs.sort(key=lambda s: s["last_message_at"] or s["created_at"], reverse=True)
+        active = [s for s in subs if not s["archived"]]
+        archived = [s for s in subs if s["archived"]] if self._show_archived else []
+
+        self._channel_list.blockSignals(True)
         self._channel_list.clear()
-        for session in self._sessions.get(self._current_character, []):
-            if session["kind"] in CHANNEL_KINDS:
-                channel = QListWidgetItem(f"# {session['title']}")
-                channel.setData(Qt.ItemDataRole.UserRole, session)
-                self._channel_list.addItem(channel)
-        if self._channel_list.count():
-            self._channel_list.setCurrentRow(0)
+        for session in [self._session_of_kind(self._current_character, "main"), *active]:
+            self._add_channel_item(session)
+        if archived:
+            separator = QListWidgetItem("― アーカイブ ―")
+            separator.setFlags(Qt.ItemFlag.NoItemFlags)
+            separator.setForeground(QColor(COLORS["text_muted"]))
+            self._channel_list.addItem(separator)
+            for session in archived:
+                self._add_channel_item(session)
+        self._channel_list.blockSignals(False)
+
+        target = select_id or self._session_of_kind(self._current_character, "main")["id"]
+        for row in range(self._channel_list.count()):
+            item = self._channel_list.item(row)
+            session = item.data(Qt.ItemDataRole.UserRole)
+            if session and session["id"] == target:
+                if self._current_session and self._current_session["id"] == target:
+                    self._channel_list.blockSignals(True)  # 同じチャンネルなら履歴を読み直さない
+                    self._channel_list.setCurrentItem(item)
+                    self._channel_list.blockSignals(False)
+                else:
+                    self._channel_list.setCurrentItem(item)
+                return
+        self._channel_list.setCurrentRow(0)
+
+    def _add_channel_item(self, session: dict) -> None:
+        mark = f"{UNREAD_MARK} " if session["id"] in self._unread else ""
+        item = QListWidgetItem(f"{mark}# {session['title']}")
+        item.setData(Qt.ItemDataRole.UserRole, session)
+        item.setToolTip(session["title"] + ("（右クリックで名前変更・アーカイブ）" if session["kind"] == "sub" else ""))
+        if session["archived"]:
+            item.setForeground(QColor(COLORS["text_muted"]))
+        elif session["id"] in self._unread:
+            item.setForeground(QColor("white"))
+        self._channel_list.addItem(item)
 
     def _on_channel_selected(self, item: QListWidgetItem | None) -> None:
-        if item is None:
+        if item is None or item.data(Qt.ItemDataRole.UserRole) is None:
             return
-        self._current_session = item.data(Qt.ItemDataRole.UserRole)
-        self._chat_header.setText(f"# {self._current_session['title']}")
+        self._current_session = self._sessions[item.data(Qt.ItemDataRole.UserRole)["id"]]
+        session_id = self._current_session["id"]
+        if session_id in self._unread:
+            self._unread.discard(session_id)
+            item.setText(f"# {self._current_session['title']}")
+        self._update_chat_header()
         self._message_view.clear()
         self._update_input_state()
-        session_id = self._current_session["id"]
         self._client.get(f"/sessions/{session_id}/messages", lambda messages: self._load_history(session_id, messages))
+
+    def _update_chat_header(self) -> None:
+        session = self._current_session
+        suffix = "　（アーカイブ済み：発言すると戻ります）" if session["archived"] else ""
+        note = "　— 長期記憶だけを参照" if session["kind"] == "sub" else ""
+        self._chat_header.setText(f"# {session['title']}{note}{suffix}")
+
+    # --- サブチャンネルの操作 ---
+
+    def _new_channel(self) -> None:
+        if self._current_character is None:
+            return
+        title, ok = QInputDialog.getText(self, "新しい話題", "チャンネル名：")
+        if ok and title.strip():
+            self._client.post(
+                f"/characters/{self._current_character}/sessions",
+                {"title": title.strip()},
+                lambda session: self._on_session_changed(session, select=True),
+            )
+
+    def _toggle_archived(self) -> None:
+        self._show_archived = self._archived_button.isChecked()
+        self._archived_button.setText("アーカイブを隠す" if self._show_archived else "アーカイブを表示")
+        self._render_channels()
+
+    def _channel_menu(self, pos: QPoint) -> None:
+        item = self._channel_list.itemAt(pos)
+        session = item.data(Qt.ItemDataRole.UserRole) if item else None
+        if not session or session["kind"] != "sub":
+            return
+        menu = QMenu(self)
+        rename = menu.addAction("名前を変更")
+        toggle = menu.addAction("アーカイブから戻す" if session["archived"] else "アーカイブする")
+        chosen = menu.exec(self._channel_list.mapToGlobal(pos))
+        if chosen == rename:
+            title, ok = QInputDialog.getText(self, "名前を変更", "チャンネル名：", text=session["title"])
+            if ok and title.strip():
+                self._client.patch(f"/sessions/{session['id']}", {"title": title.strip()})
+        elif chosen == toggle:
+            self._client.patch(f"/sessions/{session['id']}", {"archived": not session["archived"]})
+
+    def _on_session_changed(self, session: dict, select: bool = False) -> None:
+        self._sessions[session["id"]] = session
+        if self._current_session and self._current_session["id"] == session["id"]:
+            self._current_session = session
+            self._update_chat_header()
+        if session["character_id"] == self._current_character:
+            self._render_channels(select_id=session["id"] if select else None)
 
     def _load_history(self, session_id: int, messages: list[dict]) -> None:
         if not self._current_session or self._current_session["id"] != session_id:
@@ -202,7 +318,7 @@ class MainWindow(QMainWindow):
         """対話ウィンドウを開く。キャラクターから話しかけるときは activate=False で、入力中の作業からフォーカスを奪わない。"""
         window = self._dialogue_windows.get(character_id)
         if window is None:
-            session = next(s for s in self._sessions[character_id] if s["kind"] == "dialogue")
+            session = self._session_of_kind(character_id, "dialogue")
             window = DialogueWindow(self._client, self._characters[character_id], session["id"])
             self._dialogue_windows[character_id] = window
         window.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, not activate)
@@ -266,12 +382,17 @@ class MainWindow(QMainWindow):
             if window is not None:
                 window.hide()
             return
+        if kind in ("session.created", "session.updated"):
+            self._on_session_changed(event["session"])
+            return
         session_id = event.get("session_id") or event.get("message", {}).get("session_id")
         if kind == "generation.started":
             self._busy_sessions.add(session_id)
         elif kind in ("message.completed", "error"):
             self._busy_sessions.discard(session_id)
         self._update_input_state()
+        if kind in ("message.created", "message.completed"):
+            self._on_new_message(event["message"])
 
         if not self._current_session or session_id != self._current_session["id"]:
             return
@@ -286,6 +407,18 @@ class MainWindow(QMainWindow):
         elif kind == "error":
             self._message_view.abort_stream()
             self._message_view.add_notice(f"応答に失敗しました：{event.get('detail')}")
+
+    def _on_new_message(self, message: dict) -> None:
+        """チャンネルの並び順（新しい順）と未読マークを更新する。対話セッションは一覧に出ないので対象外。"""
+        session = self._sessions.get(message["session_id"])
+        if session is None or session["kind"] == "dialogue":
+            return
+        session["last_message_at"] = message["created_at"]
+        is_current = self._current_session is not None and self._current_session["id"] == session["id"]
+        if not is_current and message["role"] != "user":
+            self._unread.add(session["id"])
+        if session["character_id"] == self._current_character:
+            self._render_channels()
 
     def closeEvent(self, event) -> None:
         for window in [*self._dialogue_windows.values(), *self._state_windows.values()]:

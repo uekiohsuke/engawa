@@ -45,7 +45,8 @@ NO_PRONOUN_RULE = "マスターのことは「マスター」と書き、「彼�
 
 KIND_CONVERSATION = "conversation"
 KIND_SELF = "self"
-STM_SESSION_KINDS = ("dialogue", "main")  # STM を参照・記録するセッション（サブスレッドは LTM のみ）
+# STM を想起するセッション。サブスレッドは LTM のみ参照する（仕様4-1）。記録はサブスレッドの会話も含めて行う
+RECALL_SESSION_KINDS = ("dialogue", "main")
 
 
 def pack(vector: list[float]) -> bytes:
@@ -114,10 +115,10 @@ class MemoryService:
     # --- STM ---
 
     async def record_message(
-        self, character_id: str, message: dict[str, Any], session_kind: str, embedding: list[float] | None = None
+        self, character_id: str, message: dict[str, Any], embedding: list[float] | None = None
     ) -> None:
         """会話の発言をSTMに登録する。埋め込みが無ければバックグラウンドで計算する。"""
-        if session_kind not in STM_SESSION_KINDS or message["role"] not in ("user", "character"):
+        if message["role"] not in ("user", "character"):
             return
         stm_id = self._db.add_stm(
             character_id,
