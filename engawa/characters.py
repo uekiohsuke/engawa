@@ -10,6 +10,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 PERSONA_DIR = Path(__file__).resolve().parent / "persona"
+ASSET_DIR = Path(__file__).resolve().parent / "assets"
+
+DEFAULT_EXPRESSION = "normal"
 
 FATIGUE_RESPONSES = ("静か", "普通", "構ってほしい")
 SLEEPINESS_RESPONSES = ("あっさり寝る", "軽く挨拶", "会話を求める")
@@ -35,12 +38,25 @@ class Personality:
 
 
 @dataclass(frozen=True)
+class CharacterImages:
+    """見た目の画像。パスは ASSET_DIR からの相対パス（区切りは /）。
+
+    standing は表情名 → 立ち絵。表情の切り替え・キャラクターごとのディレクトリ分けは、
+    ここの対応を書き換えるだけで済むようにしておく。
+    """
+
+    icon: str | None = None  # キャラクター一覧・チャットの発言に出す
+    standing: dict[str, str] = field(default_factory=dict)  # 対話ウィンドウに出す
+
+
+@dataclass(frozen=True)
 class Character:
     id: str
     name: str
     persona_file: str
     personality: Personality = field(default_factory=Personality)
     rhythm: RhythmProfile = field(default_factory=lambda: RhythmProfile(wake_hour=8.0, bedtime_hour=24.0))
+    images: CharacterImages = field(default_factory=CharacterImages)
 
     def system_prompt(self) -> str:
         return (PERSONA_DIR / self.persona_file).read_text(encoding="utf-8")
@@ -58,6 +74,10 @@ CHARACTERS: dict[str, Character] = {
         ),
         # 8時起床・25時（翌1時）就寝。何かしている時間帯（14〜17時）は仮決め
         rhythm=RhythmProfile(wake_hour=8.0, bedtime_hour=25.0, busy_blocks=((14.0, 17.0),)),
+        images=CharacterImages(
+            icon="icon/sui_chibi_normal.png",
+            standing={DEFAULT_EXPRESSION: "standing/sui_standing_normal.png"},
+        ),
     ),
 }
 

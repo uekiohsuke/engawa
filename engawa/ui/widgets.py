@@ -5,7 +5,12 @@ from __future__ import annotations
 from datetime import datetime
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtWidgets import QFrame, QLabel, QScrollArea, QVBoxLayout, QWidget
+from PySide6.QtGui import QPixmap
+from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QScrollArea, QVBoxLayout, QWidget
+
+from engawa.ui.images import icon_pixmap
+
+USER_NAME = "あなた"
 
 # Discord 風のダークテーマ
 COLORS = {
@@ -60,13 +65,26 @@ def format_time(iso: str | None) -> str:
     return moment.strftime("%m/%d %H:%M")
 
 
-class MessageRow(QFrame):
-    """1件分のメッセージ表示（名前・時刻・本文）。"""
+AVATAR_SIZE = 40
 
-    def __init__(self, author: str, color: str, content: str, created_at: str | None = None):
+
+class MessageRow(QFrame):
+    """1件分のメッセージ表示（アイコン・名前・時刻・本文）。"""
+
+    def __init__(
+        self, author: str, color: str, content: str, created_at: str | None = None, avatar: QPixmap | None = None
+    ):
         super().__init__()
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 6, 16, 6)
+        row = QHBoxLayout(self)
+        row.setContentsMargins(16, 6, 16, 6)
+        row.setSpacing(12)
+        avatar_label = QLabel()
+        avatar_label.setFixedSize(AVATAR_SIZE, AVATAR_SIZE)  # アイコンがない発言も本文の位置を揃える
+        if avatar is not None:
+            avatar_label.setPixmap(avatar)
+        row.addWidget(avatar_label, alignment=Qt.AlignmentFlag.AlignTop)
+
+        layout = QVBoxLayout()
         layout.setSpacing(2)
         header = QLabel(
             f'<span style="color:{color}; font-weight:bold;">{author}</span>'
@@ -79,6 +97,7 @@ class MessageRow(QFrame):
         self.set_text(content)
         layout.addWidget(header)
         layout.addWidget(self.body)
+        row.addLayout(layout, 1)
 
     def set_text(self, text: str) -> None:
         self.body.setText(text)
@@ -90,9 +109,11 @@ class MessageRow(QFrame):
 class MessageView(QScrollArea):
     """メッセージの縦並び表示。生成中のキャラクター発言はストリーム表示する。"""
 
-    def __init__(self, character_name: str):
+    def __init__(self):
         super().__init__()
-        self._character_name = character_name
+        self._character_name = ""
+        self._character_avatar: QPixmap | None = None
+        self._user_avatar = icon_pixmap(None, AVATAR_SIZE, USER_NAME, COLORS["bg_hover"])
         self._streaming: MessageRow | None = None
         self.setWidgetResizable(True)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -104,8 +125,12 @@ class MessageView(QScrollArea):
         self._layout.addStretch(1)
         self.setWidget(container)
 
-    def set_character_name(self, name: str) -> None:
-        self._character_name = name
+    def set_character(self, character: dict) -> None:
+        self._character_name = character["name"]
+        self._character_avatar = icon_pixmap(character.get("icon"), AVATAR_SIZE, character["name"], COLORS["character"])
+
+    def _character_row(self, content: str, created_at: str | None = None) -> MessageRow:
+        return MessageRow(self._character_name, COLORS["character"], content, created_at, self._character_avatar)
 
     def clear(self) -> None:
         while self._layout.count() > 1:
@@ -116,9 +141,9 @@ class MessageView(QScrollArea):
 
     def add_message(self, message: dict) -> None:
         if message["role"] == "character":
-            row = MessageRow(self._character_name, COLORS["character"], message["content"], message["created_at"])
+            row = self._character_row(message["content"], message["created_at"])
         elif message["role"] == "user":
-            row = MessageRow("あなた", COLORS["user"], message["content"], message["created_at"])
+            row = MessageRow(USER_NAME, COLORS["user"], message["content"], message["created_at"], self._user_avatar)
         else:
             row = MessageRow("system", COLORS["text_muted"], message["content"], message["created_at"])
         self._append_row(row)
@@ -127,7 +152,7 @@ class MessageView(QScrollArea):
         self._append_row(MessageRow("system", COLORS["error"], text))
 
     def start_stream(self) -> None:
-        self._streaming = MessageRow(self._character_name, COLORS["character"], "")
+        self._streaming = self._character_row("")
         self._append_row(self._streaming)
 
     def append_stream(self, delta: str) -> None:

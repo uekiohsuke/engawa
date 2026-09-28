@@ -110,7 +110,10 @@ def create_app(
 
     @app.get("/characters")
     async def list_characters():
-        return [{"id": c.id, "name": c.name} for c in CHARACTERS.values()]
+        return [
+            {"id": c.id, "name": c.name, "icon": c.images.icon, "standing": c.images.standing}
+            for c in CHARACTERS.values()
+        ]
 
     @app.get("/characters/{character_id}/sessions")
     async def list_sessions(character_id: str):

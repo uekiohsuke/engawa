@@ -7,8 +7,8 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QPoint, QSettings, Qt, Signal
-from PySide6.QtGui import QColor, QKeyEvent
+from PySide6.QtCore import QPoint, QSettings, QSize, Qt, Signal
+from PySide6.QtGui import QColor, QIcon, QKeyEvent
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QInputDialog,
@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
 from engawa.ui.activity import ActivityWatcher
 from engawa.ui.client import CoreClient
 from engawa.ui.dialogue_window import DialogueWindow
+from engawa.ui.images import icon_pixmap
 from engawa.ui.state_window import StateWindow
 from engawa.ui.tts import Speaker
 from engawa.ui.widgets import COLORS, MessageView
@@ -34,6 +35,7 @@ from engawa.ui.widgets import COLORS, MessageView
 PRESENCE_MARKS = {"both": "🟢", "message_only": "🟡", "sleeping": "🌙"}
 UNREAD_MARK = "●"
 WATCH_SETTING = "activity/enabled"
+CHARACTER_ICON_SIZE = 32
 
 
 class MessageInput(QPlainTextEdit):
@@ -148,7 +150,7 @@ class MainWindow(QMainWindow):
 
         self._chat_header = QLabel()
         self._chat_header.setObjectName("chatHeader")
-        self._message_view = MessageView("")
+        self._message_view = MessageView()
         self._input = MessageInput()
         self._input.submitted.connect(self._send)
         self._send_button = QPushButton("送信")
@@ -182,9 +184,11 @@ class MainWindow(QMainWindow):
         client.request_failed.connect(lambda detail: self.statusBar().showMessage(f"通信エラー：{detail}", 5000))
         self.statusBar().showMessage("コアに接続中…")
 
+        self._character_list.setIconSize(QSize(CHARACTER_ICON_SIZE, CHARACTER_ICON_SIZE))
         for character in characters:
             item = QListWidgetItem(character["name"])
             item.setData(Qt.ItemDataRole.UserRole, character["id"])
+            item.setIcon(QIcon(icon_pixmap(character.get("icon"), CHARACTER_ICON_SIZE, character["name"], COLORS["character"])))
             self._character_list.addItem(item)
             self._character_items[character["id"]] = item
             client.get(f"/characters/{character['id']}/state", self._update_presence)
@@ -197,7 +201,7 @@ class MainWindow(QMainWindow):
         if item is None:
             return
         self._current_character = item.data(Qt.ItemDataRole.UserRole)
-        self._message_view.set_character_name(self._characters[self._current_character]["name"])
+        self._message_view.set_character(self._characters[self._current_character])
         self._current_session = None
         self._render_channels()
 

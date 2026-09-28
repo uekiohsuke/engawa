@@ -3,7 +3,6 @@ from datetime import timedelta
 
 import pytest
 from fastapi.testclient import TestClient
-from PySide6.QtCore import QCoreApplication
 
 import engawa.ui.activity as activity_module
 from engawa.config import Settings
@@ -126,11 +125,6 @@ class FakeClient:
 
     def post(self, path, body, on_success=None, on_error=None):
         self.posts.append((path, body))
-
-
-@pytest.fixture
-def qt_app():
-    return QCoreApplication.instance() or QCoreApplication(sys.argv)
 
 
 def test_watcher_respects_switches_and_exclusions(qt_app, monkeypatch):
