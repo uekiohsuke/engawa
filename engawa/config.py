@@ -26,6 +26,10 @@ class Settings:
     embed_model: str = "bge-m3"
     judge_interval_seconds: float = 60.0  # 0 以下で能動発話を無効化
     dialogue_timeout_seconds: float = 180.0
+    tts_enabled: bool = True
+    voicevox_path: str = ""  # 空なら自動起動しない（既に動いているエンジンだけを使う）
+    voicevox_url: str = "http://127.0.0.1:50021"
+    voicevox_speaker: int = 47  # ナースロボ＿タイプＴ（ノーマル）
 
     @property
     def db_path(self) -> Path:
@@ -58,4 +62,8 @@ def load_settings() -> Settings:
         dialogue_timeout_seconds=float(
             os.getenv("ENGAWA_DIALOGUE_TIMEOUT_SECONDS", defaults.dialogue_timeout_seconds)
         ),
+        tts_enabled=os.getenv("ENGAWA_TTS_ENABLED", "1").lower() not in ("0", "false", "no", ""),
+        voicevox_path=os.getenv("ENGAWA_VOICEVOX_PATH", defaults.voicevox_path),
+        voicevox_url=os.getenv("ENGAWA_VOICEVOX_URL", defaults.voicevox_url).rstrip("/"),
+        voicevox_speaker=int(os.getenv("ENGAWA_VOICEVOX_SPEAKER", defaults.voicevox_speaker)),
     )

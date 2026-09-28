@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
 from engawa.ui.client import CoreClient
 from engawa.ui.dialogue_window import DialogueWindow
 from engawa.ui.state_window import StateWindow
+from engawa.ui.tts import Speaker
 from engawa.ui.widgets import COLORS, MessageView
 
 PRESENCE_MARKS = {"both": "🟢", "message_only": "🟡", "sleeping": "🌙"}
@@ -65,9 +66,16 @@ def _pane(object_name: str, title: str, widget: QWidget) -> QWidget:
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, client: CoreClient, characters: list[dict], sessions: dict[str, list[dict]]):
+    def __init__(
+        self,
+        client: CoreClient,
+        characters: list[dict],
+        sessions: dict[str, list[dict]],
+        speaker: Speaker | None = None,
+    ):
         super().__init__()
         self._client = client
+        self._speaker = speaker
         self._characters = {c["id"]: c for c in characters}
         self._sessions: dict[int, dict] = {s["id"]: s for ss in sessions.values() for s in ss}
         self._current_character: str | None = None
@@ -319,7 +327,7 @@ class MainWindow(QMainWindow):
         window = self._dialogue_windows.get(character_id)
         if window is None:
             session = self._session_of_kind(character_id, "dialogue")
-            window = DialogueWindow(self._client, self._characters[character_id], session["id"])
+            window = DialogueWindow(self._client, self._characters[character_id], session["id"], self._speaker)
             self._dialogue_windows[character_id] = window
         window.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, not activate)
         window.show()

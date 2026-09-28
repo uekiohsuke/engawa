@@ -9,15 +9,25 @@ from PySide6.QtWidgets import QApplication, QMessageBox
 from engawa.config import load_settings
 from engawa.ui.client import CoreClient
 from engawa.ui.main_window import MainWindow
+from engawa.ui.tts import Speaker, VoicevoxEngine
 from engawa.ui.widgets import APP_STYLE
 
 
 def main() -> int:
     app = QApplication(sys.argv)
     app.setApplicationName("縁側")
+    app.setOrganizationName("engawa")  # QSettings（読み上げON/OFFなど）の保存先
     app.setStyleSheet(APP_STYLE)
-    client = CoreClient(load_settings().core_base_url)
+    settings = load_settings()
+    client = CoreClient(settings.core_base_url)
     state: dict = {}
+
+    speaker = None
+    if settings.tts_enabled:
+        engine = VoicevoxEngine(settings.voicevox_path)
+        engine.start()  # 既に動いているエンジンがあれば、そちらが使われる（ポートが埋まっていて新しい方は終了する）
+        app.aboutToQuit.connect(engine.stop)
+        speaker = Speaker(settings.voicevox_url, settings.voicevox_speaker)
 
     def fail(status: int, detail: str) -> None:
         QMessageBox.critical(None, "縁側", f"コアに接続できませんでした。\n先に python -m engawa.core を起動してください。\n\n{detail}")
@@ -29,7 +39,7 @@ def main() -> int:
         def on_sessions(character_id: str, result: list[dict]) -> None:
             sessions[character_id] = result
             if len(sessions) == len(characters):
-                window = MainWindow(client, characters, sessions)
+                window = MainWindow(client, characters, sessions, speaker)
                 state["window"] = window
                 client.connect_events()
                 window.show()
