@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import random
+import re
 import zlib
 from collections.abc import AsyncIterator
 from typing import Any, Protocol
@@ -124,13 +125,17 @@ class MockLLMClient:
 
     async def stream_chat(self, messages: list[ChatMessage]) -> AsyncIterator[str]:
         last_user = next((m["content"] for m in reversed(messages) if m["role"] == "user"), "")
+        # 表情タグの指示があれば、立ち絵の切り替えを確かめられるよう適当な表情を付ける
+        system = messages[0]["content"] if messages and messages[0]["role"] == "system" else ""
+        expressions = re.findall(r"^- \[(\w+)\]：", system, flags=re.MULTILINE)
+        tag = f"[{random.choice(expressions)}] " if expressions else ""
         if last_user.startswith(INSTRUCTION_PREFIX):
-            reply = "(mock) " + MOCK_PROACTIVE_REPLY
+            reply = tag + "(mock) " + MOCK_PROACTIVE_REPLY
         else:
-            text = last_user.strip().replace("\n", " ")
+            text = re.sub(r"^（[\d/: ]+）", "", last_user).strip().replace("\n", " ")  # 発言の時刻は引用しない
             if len(text) > 20:
                 text = text[:20] + "…"
-            reply = "(mock) " + random.choice(MOCK_REPLIES).format(text=text)
+            reply = tag + "(mock) " + random.choice(MOCK_REPLIES).format(text=text)
         for i in range(0, len(reply), 3):
             if self._delay:
                 await asyncio.sleep(self._delay)

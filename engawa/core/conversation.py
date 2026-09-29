@@ -10,9 +10,11 @@ from typing import Any
 from engawa.characters import Character
 from engawa.core.db import Database
 from engawa.core.events import EventHub
+from engawa.core.expression import ExpressionFilter, expression_section
 from engawa.core.llm import INSTRUCTION_PREFIX, ChatMessage, LLMClient
 from engawa.core.memory import RECALL_SESSION_KINDS, MemoryService
 from engawa.core.state_service import StateService
+from engawa.core.timewords import describe_elapsed, message_stamp
 
 log = logging.getLogger(__name__)
 
@@ -25,6 +27,17 @@ class SessionBusyError(Exception):
 
 FAREWELL_WINDOW = timedelta(minutes=15)
 SUB_ARCHIVE_AFTER = timedelta(days=3)
+ELAPSED_NOTICE_AFTER = timedelta(minutes=30)  # これ以上間が空いたら「〜ぶり」を伝える
+
+
+def time_section(elapsed: timedelta | None) -> str:
+    lines = [
+        "## 時間の流れ",
+        "- マスターの発言の先頭の（月/日 時:分）は、その発言をした日時。返事には書かないこと。",
+    ]
+    if elapsed is not None and elapsed >= ELAPSED_NOTICE_AFTER:
+        lines.append(f"- この会話での前回のやりとりから{describe_elapsed(elapsed)}ぶり。間が空いたことを踏まえて話すこと。")
+    return "\n".join(lines)
 
 
 def asleep_notice(character: Character) -> str:
@@ -89,13 +102,20 @@ class ConversationService:
                 archived += 1
         return archived
 
-    def build_system_prompt(self, character: Character, related: list[dict[str, Any]] | None = None) -> str:
+    def build_system_prompt(
+        self,
+        character: Character,
+        related: list[dict[str, Any]] | None = None,
+        elapsed: timedelta | None = None,
+    ) -> str:
         sections = [character.system_prompt()]
         if self._memory:
             sections.append(self._memory.ltm_section(character.id))
         sections.append(self._state.prompt_section(character.id))
+        sections.append(time_section(elapsed))
         if self._memory and related:
             sections.append(self._memory.related_section(character, related))
+        sections.append(expression_section(character.images.standing))
         return "\n\n".join(s for s in sections if s)
 
     def build_messages(
@@ -105,18 +125,37 @@ class ConversationService:
         instruction: str | None = None,
         related: list[dict[str, Any]] | None = None,
     ) -> list[ChatMessage]:
-        messages: list[ChatMessage] = [{"role": "system", "content": self.build_system_prompt(character, related)}]
-        for m in self._db.recent_messages(session_id, self._history_window):
+        history = self._db.recent_messages(session_id, self._history_window)
+        uses_tags = expression_section(character.images.standing) is not None
+        messages: list[ChatMessage] = [
+            {"role": "system", "content": self.build_system_prompt(character, related, self._elapsed(history, instruction))}
+        ]
+        for m in history:
             role = ROLE_TO_LLM.get(m["role"])
-            if role:
-                messages.append({"role": role, "content": m["content"]})
+            if role == "user":
+                messages.append({"role": role, "content": message_stamp(m["created_at"]) + m["content"]})
+            elif role == "assistant":
+                # 過去の返事にもタグを戻しておく（履歴にタグがないと、付けなくなっていくため）
+                # 今は登録されていない表情のタグは戻さない（真似して使わないように）
+                tag = f"[{m['expression']}] " if uses_tags and m.get("expression") in character.images.standing else ""
+                messages.append({"role": role, "content": tag + m["content"]})
         if instruction:
             # 能動発話など、ユーザー発言ではない最終ターン。履歴には保存しない
             messages.append({"role": "user", "content": INSTRUCTION_PREFIX + instruction})
         return messages
 
-    def _add_message(self, session_id: int, role: str, content: str) -> dict[str, Any]:
-        return self._db.add_message(session_id, role, content, self._state.now().isoformat())
+    def _elapsed(self, history: list[dict[str, Any]], instruction: str | None) -> timedelta | None:
+        """前回のやりとりからの経過時間。返事なら「今の発言とその前の発言」の間、話しかけなら「今と最後の発言」の間。"""
+        if instruction is not None:
+            if not history:
+                return None
+            return self._state.now() - datetime.fromisoformat(history[-1]["created_at"])
+        if len(history) < 2:
+            return None
+        return datetime.fromisoformat(history[-1]["created_at"]) - datetime.fromisoformat(history[-2]["created_at"])
+
+    def _add_message(self, session_id: int, role: str, content: str, expression: str | None = None) -> dict[str, Any]:
+        return self._db.add_message(session_id, role, content, self._state.now().isoformat(), expression)
 
     async def post_user_message(self, character: Character, session_id: int, content: str) -> dict[str, Any]:
         """ユーザー発言を保存し、キャラクターの応答生成をバックグラウンドで開始する。"""
@@ -206,13 +245,28 @@ class ConversationService:
             related = await self._recall(character, session_id, query)
             chunks: list[str] = []
             messages = self.build_messages(character, session_id, instruction, related)
+            tags = ExpressionFilter(character.images.standing)
+            announced = False
+
+            async def emit(text: str) -> None:
+                nonlocal announced
+                if tags.expression and not announced:
+                    # 表情は本文より先に届ける（言い始めと同時に立ち絵が変わるように）
+                    announced = True
+                    await self._hub.publish(
+                        "expression.changed", session_id=session_id, character_id=character.id, expression=tags.expression
+                    )
+                if text:
+                    chunks.append(text)
+                    await self._hub.publish("message.delta", session_id=session_id, delta=text)
+
             async for delta in self._llm.stream_chat(messages):
-                chunks.append(delta)
-                await self._hub.publish("message.delta", session_id=session_id, delta=delta)
+                await emit(tags.feed(delta))
+            await emit(tags.flush())
             reply = "".join(chunks).strip()
             if not reply:
                 raise RuntimeError("LLM returned an empty reply")
-            message = self._add_message(session_id, "character", reply)
+            message = self._add_message(session_id, "character", reply, tags.expression)
             await self._hub.publish("message.completed", message=message)
             await self._remember(character, session_id, message)
             return message

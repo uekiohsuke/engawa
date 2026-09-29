@@ -13,6 +13,13 @@ PERSONA_DIR = Path(__file__).resolve().parent / "persona"
 ASSET_DIR = Path(__file__).resolve().parent / "assets"
 
 DEFAULT_EXPRESSION = "normal"
+# 生成層に表情タグを選ばせるときの説明。立ち絵が登録されている表情だけを伝える
+EXPRESSION_DESCRIPTIONS = {
+    "normal": "ふだん・落ち着いている",
+    "think": "考え込む・悩む・疑問に思う・呆れる",
+    "joy": "嬉しい・楽しい・機嫌がいい",
+    "blush": "照れる・恥ずかしい・図星を突かれる",
+}
 
 FATIGUE_RESPONSES = ("静か", "普通", "構ってほしい")
 SLEEPINESS_RESPONSES = ("あっさり寝る", "軽く挨拶", "会話を求める")
@@ -76,7 +83,11 @@ CHARACTERS: dict[str, Character] = {
         rhythm=RhythmProfile(wake_hour=8.0, bedtime_hour=25.0, busy_blocks=((14.0, 17.0),)),
         images=CharacterImages(
             icon="icon/sui_chibi_normal.png",
-            standing={DEFAULT_EXPRESSION: "standing/sui_standing_normal.png"},
+            standing={
+                expression: f"standing/sui_standing_{expression}.png"
+                # blush は背景が透過されていない画像のため、差し替えるまで使わない
+                for expression in (DEFAULT_EXPRESSION, "think", "joy")
+            },
         ),
     ),
 }

@@ -32,7 +32,8 @@ CREATE TABLE IF NOT EXISTS messages (
     session_id INTEGER NOT NULL REFERENCES sessions(id),
     role TEXT NOT NULL,
     content TEXT NOT NULL,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    expression TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, id);
 CREATE TABLE IF NOT EXISTS character_state (
@@ -115,6 +116,10 @@ class Database:
         if "archived" not in columns:
             self._conn.execute("ALTER TABLE sessions ADD COLUMN archived INTEGER NOT NULL DEFAULT 0")
             self._conn.commit()
+        columns = {r["name"] for r in self._conn.execute("PRAGMA table_info(messages)")}
+        if "expression" not in columns:
+            self._conn.execute("ALTER TABLE messages ADD COLUMN expression TEXT")
+            self._conn.commit()
 
     def close(self) -> None:
         self._conn.close()
@@ -165,12 +170,14 @@ class Database:
             if archived is not None:
                 self._conn.execute("UPDATE sessions SET archived = ? WHERE id = ?", (int(archived), session_id))
 
-    def add_message(self, session_id: int, role: str, content: str, created_at: str | None = None) -> dict[str, Any]:
+    def add_message(
+        self, session_id: int, role: str, content: str, created_at: str | None = None, expression: str | None = None
+    ) -> dict[str, Any]:
         created_at = created_at or _now()
         with self._lock, self._conn:
             cur = self._conn.execute(
-                "INSERT INTO messages (session_id, role, content, created_at) VALUES (?, ?, ?, ?)",
-                (session_id, role, content, created_at),
+                "INSERT INTO messages (session_id, role, content, created_at, expression) VALUES (?, ?, ?, ?, ?)",
+                (session_id, role, content, created_at, expression),
             )
         return {
             "id": cur.lastrowid,
@@ -178,6 +185,7 @@ class Database:
             "role": role,
             "content": content,
             "created_at": created_at,
+            "expression": expression,
         }
 
     def load_state(self, character_id: str) -> dict[str, Any] | None:

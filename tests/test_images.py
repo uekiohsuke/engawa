@@ -15,7 +15,7 @@ SUI = {
     "id": "sui",
     "name": "翠",
     "icon": "icon/sui_chibi_normal.png",
-    "standing": {"normal": "standing/sui_standing_normal.png"},
+    "standing": {e: f"standing/sui_standing_{e}.png" for e in ("normal", "think", "joy")},
 }
 
 

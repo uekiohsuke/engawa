@@ -15,6 +15,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from engawa.characters import Character, RhythmProfile
+from engawa.core.timewords import describe_now
 
 # --- 閾値 ---
 BOREDOM_HIGH = 0.7
@@ -126,7 +127,6 @@ SLEEPINESS_HINTS = {
     "軽く挨拶": "眠いので、長話はせず、おやすみの一言くらいは言いたい。",
     "会話を求める": "眠いけれど、寝る前にもう少しマスターと話していたい。",
 }
-WEEKDAYS = "月火水木金土日"
 
 
 class StateEngine:
@@ -213,7 +213,7 @@ class StateEngine:
         p = self.character.personality
         lines = [
             "## 現在の状態（あなた自身の今の調子。数値や「状態」という言葉は口にせず、振る舞いに自然に表すこと）",
-            f"- 現在時刻：{now.month}月{now.day}日（{WEEKDAYS[now.weekday()]}） {now:%H:%M}",
+            f"- 現在時刻：{describe_now(now)}",
             f"- 眠気：{_level(s.sleepiness, ('眠くない', '少し眠い', 'かなり眠い', 'もう限界に近いくらい眠い'))}",
             f"- 疲れ：{_level(s.fatigue, ('元気', '少し疲れている', '疲れている', 'へとへと'))}",
             f"- 暇さ：{_level(s.boredom, ('特に暇ではない', '少し暇', '暇を持て余している', '退屈でたまらない'))}",

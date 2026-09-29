@@ -67,8 +67,9 @@ def test_build_messages_uses_persona_and_window(tmp_path):
     db.ensure_default_sessions("sui")
     sid = db.list_sessions("sui")[0]["id"]
     for i in range(4):
-        db.add_message(sid, "user", f"u{i}")
-        db.add_message(sid, "character", f"c{i}")
+        at = (NOON + timedelta(minutes=i)).isoformat()
+        db.add_message(sid, "user", f"u{i}", at)
+        db.add_message(sid, "character", f"c{i}", at, expression="joy" if i == 3 else None)
     hub = EventHub()
     state = StateService(db, hub, CHARACTERS.values(), FakeClock())
     service = ConversationService(db, MockLLMClient(delay=0), hub, state, history_window=3)
@@ -76,11 +77,13 @@ def test_build_messages_uses_persona_and_window(tmp_path):
     assert messages[0]["role"] == "system"
     assert "翠" in messages[0]["content"]
     assert "## 現在の状態" in messages[0]["content"]
-    assert "9月28日" in messages[0]["content"]
+    assert "9月28日（月） 12:00（昼・秋）" in messages[0]["content"]
+    assert "## 表情" in messages[0]["content"]
+    # ユーザーの発言には時刻を、キャラクターの過去の返事には表情タグを付けて渡す
     assert [(m["role"], m["content"]) for m in messages[1:]] == [
         ("assistant", "c2"),
-        ("user", "u3"),
-        ("assistant", "c3"),
+        ("user", "（9/28 12:03）u3"),
+        ("assistant", "[joy] c3"),
     ]
 
 

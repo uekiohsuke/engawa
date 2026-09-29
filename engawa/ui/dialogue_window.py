@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QPoint, QPointF, QSettings, Qt
+from PySide6.QtCore import QPoint, QPointF, QSettings, Qt, QTimer
 from PySide6.QtGui import QColor, QGuiApplication, QHideEvent, QMouseEvent, QPainter, QPaintEvent, QPolygonF, QWheelEvent
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QLineEdit, QPushButton, QVBoxLayout, QWidget
 
@@ -28,6 +28,7 @@ PANEL_TOP_RATIO = 0.08  # 吹き出しを顔の高さあたりに置く
 TAIL_SIZE = (12, 20)
 TAIL_TOP = 36  # パネル上端から三角までの距離（名前の行の少し下）
 SCREEN_MARGIN = 16
+EXPRESSION_HOLD_MS = 30_000  # 言い終えて（読み上げも終えて）から、ふだんの表情に戻すまで
 
 DIALOGUE_STYLE = f"""
 #dialoguePanel {{ background: {COLORS['bg_channels']}; border: 1px solid {COLORS['bg_hover']}; border-radius: 14px; }}
@@ -69,6 +70,13 @@ class DialogueWindow(QWidget):
         self._drag_offset: QPoint | None = None
         self._busy = False
         self._expression = DEFAULT_EXPRESSION
+        # 言い終えてしばらくしたら、ふだんの表情に戻す
+        self._revert_timer = QTimer(self)
+        self._revert_timer.setSingleShot(True)
+        self._revert_timer.setInterval(EXPRESSION_HOLD_MS)
+        self._revert_timer.timeout.connect(self._revert_expression)
+        if speaker is not None:
+            speaker.speaking_changed.connect(self._on_speaking_changed)
         self._placed = False
         self._standing_height = min(
             max(QSettings().value(HEIGHT_SETTING, STANDING_HEIGHT, type=int), STANDING_HEIGHT_RANGE[0]),
@@ -150,6 +158,17 @@ class DialogueWindow(QWidget):
         if expression != self._expression:
             self._expression = expression
             self._apply_standing()
+
+    def _on_speaking_changed(self, playing: bool) -> None:
+        # 戻すのを待っている間に1文読み終えたら、そこから数え直す
+        if not playing and self._revert_timer.isActive():
+            self._revert_timer.start()
+
+    def _revert_expression(self) -> None:
+        if self._busy or (self._speaker is not None and self._speaker.is_busy()):
+            self._revert_timer.start()  # まだ話している途中
+            return
+        self.set_expression(DEFAULT_EXPRESSION)
 
     def _apply_standing(self) -> None:
         """立ち絵と、それに合わせたウィンドウの大きさ・吹き出しの高さを決める。足元（右下）の位置は保つ。"""
@@ -241,7 +260,10 @@ class DialogueWindow(QWidget):
         if session_id != self._session_id:
             return
         voice = self._voice()
-        if kind == "message.created":
+        if kind == "expression.changed":
+            self._revert_timer.stop()
+            self.set_expression(event["expression"])
+        elif kind == "message.created":
             message = event["message"]
             self._bubble.setText(message["content"] if message["role"] == "system" else THINKING)
             if voice and message["role"] == "user":
@@ -261,6 +283,8 @@ class DialogueWindow(QWidget):
             self._bubble.setText(event["message"]["content"])
             if voice:
                 voice.end_stream()
+            if self._expression != DEFAULT_EXPRESSION:
+                self._revert_timer.start()
         elif kind == "error":
             self._busy = False
             self._bubble.setText(f"（応答に失敗しました：{event.get('detail')}）")

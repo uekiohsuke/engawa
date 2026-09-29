@@ -125,6 +125,10 @@ class Speaker(QObject):
         self._pending_text.append(text)
         self._synthesize_next()
 
+    def is_busy(self) -> bool:
+        """読み上げ中か、まだ読む文が残っているか。"""
+        return self._playing or self._synthesizing or bool(self._pending_text or self._ready or self._buffer.strip())
+
     def stop(self) -> None:
         """読み上げを止め、待ち行列を空にする。"""
         self._generation += 1
