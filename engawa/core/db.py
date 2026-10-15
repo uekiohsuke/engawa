@@ -52,31 +52,52 @@ CREATE TABLE IF NOT EXISTS app_settings (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
-CREATE TABLE IF NOT EXISTS stm (
+CREATE TABLE IF NOT EXISTS episodes (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     character_id TEXT NOT NULL,
-    kind TEXT NOT NULL,              -- conversation（会話由来）/ self（自己言及・生活由来）
-    speaker TEXT,                    -- conversation のとき user / character
+    subject TEXT NOT NULL,           -- どの相手のプロフィールのエピソード層に属するか（MVP は user のみ）
+    session_id INTEGER,
+    first_message_id INTEGER,        -- 切り出し元の短期記憶（発言）の範囲
+    last_message_id INTEGER,
     content TEXT NOT NULL,
-    message_id INTEGER,
+    happened_at TEXT NOT NULL,       -- 出来事の時刻（切り出し元の最初の発言）
     created_at TEXT NOT NULL,
-    ref_count INTEGER NOT NULL DEFAULT 0,  -- 日をまたいで累積する参照回数
-    distilled INTEGER NOT NULL DEFAULT 0,
-    embedding BLOB
+    embedding BLOB,
+    access_count INTEGER NOT NULL DEFAULT 0,
+    last_accessed_at TEXT,
+    grace_until TEXT NOT NULL,       -- 削除猶予。過ぎたら「削除対象」（件数上限のときだけ消される）
+    expires_at TEXT NOT NULL         -- 時限。過ぎたら即削除
 );
-CREATE INDEX IF NOT EXISTS idx_stm_character ON stm(character_id, id);
+CREATE INDEX IF NOT EXISTS idx_episodes_character ON episodes(character_id, id);
+CREATE TABLE IF NOT EXISTS impression_memos (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    character_id TEXT NOT NULL,
+    subject TEXT NOT NULL,           -- user（相手への印象）/ self（自分について）
+    content TEXT NOT NULL,
+    episode_id INTEGER,
+    created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS profiles (
+    character_id TEXT NOT NULL,
+    subject TEXT NOT NULL,
+    impression TEXT NOT NULL,        -- 印象層。常にプロンプトに載せる
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (character_id, subject)
+);
+CREATE TABLE IF NOT EXISTS profile_versions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    character_id TEXT NOT NULL,
+    subject TEXT NOT NULL,
+    impression TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS seeds (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     character_id TEXT NOT NULL,
+    source TEXT NOT NULL,            -- recall（思い出し：エピソードから）/ topic（話題作成：印象層から）
     content TEXT NOT NULL,
     created_at TEXT NOT NULL,
     used_at TEXT
-);
-CREATE TABLE IF NOT EXISTS ltm (
-    character_id TEXT PRIMARY KEY,
-    conversation TEXT NOT NULL,
-    self TEXT NOT NULL,
-    updated_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS activity (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -85,14 +106,10 @@ CREATE TABLE IF NOT EXISTS activity (
     started_at TEXT NOT NULL,
     ended_at TEXT NOT NULL      -- 同じウィンドウが続いている間は延長する
 );
-CREATE TABLE IF NOT EXISTS ltm_versions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    character_id TEXT NOT NULL,
-    conversation TEXT NOT NULL,
-    self TEXT NOT NULL,
-    created_at TEXT NOT NULL
-);
 """
+
+# 記憶v1のテーブル。v2 に移るときにデータごと捨てる（仕様8章：v2 はまっさらに始める）
+V1_MEMORY_TABLES = ("stm", "ltm", "ltm_versions", "seeds")
 
 
 def _now() -> str:
@@ -107,8 +124,21 @@ class Database:
         self._conn.row_factory = sqlite3.Row
         self._lock = threading.Lock()
         with self._lock:
+            self._drop_v1_memory()
             self._conn.executescript(SCHEMA)
             self._migrate()
+
+    def _drop_v1_memory(self) -> None:
+        """記憶v1のDBなら、v1の記憶テーブルと記憶調整の進み具合を捨てる。会話ログ（messages）は残す。"""
+        tables = {r[0] for r in self._conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+        if "stm" not in tables:
+            return
+        with self._conn:
+            for table in V1_MEMORY_TABLES:
+                self._conn.execute(f"DROP TABLE IF EXISTS {table}")
+            self._conn.execute(
+                "DELETE FROM app_settings WHERE key LIKE 'memory_cursor:%' OR key LIKE 'activity_cursor:%'"
+            )
 
     def _migrate(self) -> None:
         """既存のDBに、後から追加した列を足す。"""
@@ -119,6 +149,10 @@ class Database:
         columns = {r["name"] for r in self._conn.execute("PRAGMA table_info(messages)")}
         if "expression" not in columns:
             self._conn.execute("ALTER TABLE messages ADD COLUMN expression TEXT")
+            self._conn.commit()
+        if "memorized" not in columns:
+            # 短期記憶としての状態。エピソード化が済んだら 1（画面の履歴としては残す）
+            self._conn.execute("ALTER TABLE messages ADD COLUMN memorized INTEGER NOT NULL DEFAULT 0")
             self._conn.commit()
 
     def close(self) -> None:
@@ -251,73 +285,130 @@ class Database:
             ).fetchone()
         return row is not None
 
-    # --- STM ---
+    # --- 短期記憶（会話ログのうち、まだエピソード化していない発言） ---
 
-    def add_stm(
+    def unmemorized_messages(self, character_id: str) -> list[dict[str, Any]]:
+        """エピソード化がまだの発言（ユーザーとキャラクターのもの）。古い順。セッションの種別も付ける。"""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT m.*, s.kind AS session_kind, s.title AS session_title FROM messages m "
+                "JOIN sessions s ON m.session_id = s.id "
+                "WHERE s.character_id = ? AND m.memorized = 0 AND m.role IN ('user', 'character') ORDER BY m.id",
+                (character_id,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def mark_memorized(self, message_ids: list[int]) -> None:
+        with self._lock, self._conn:
+            self._conn.executemany("UPDATE messages SET memorized = 1 WHERE id = ?", [(i,) for i in message_ids])
+
+    # --- エピソード記憶 ---
+
+    def add_episode(
         self,
         character_id: str,
-        kind: str,
+        subject: str,
         content: str,
+        *,
+        session_id: int | None,
+        first_message_id: int | None,
+        last_message_id: int | None,
+        happened_at: str,
         created_at: str,
-        speaker: str | None = None,
-        message_id: int | None = None,
+        grace_until: str,
+        expires_at: str,
         embedding: bytes | None = None,
     ) -> int:
         with self._lock, self._conn:
             cur = self._conn.execute(
-                "INSERT INTO stm (character_id, kind, speaker, content, message_id, created_at, embedding) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (character_id, kind, speaker, content, message_id, created_at, embedding),
+                "INSERT INTO episodes (character_id, subject, session_id, first_message_id, last_message_id, content, "
+                "happened_at, created_at, embedding, grace_until, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    character_id, subject, session_id, first_message_id, last_message_id, content,
+                    happened_at, created_at, embedding, grace_until, expires_at,
+                ),
             )
         return cur.lastrowid
 
-    def set_stm_embedding(self, stm_id: int, embedding: bytes) -> None:
-        with self._lock, self._conn:
-            self._conn.execute("UPDATE stm SET embedding = ? WHERE id = ?", (embedding, stm_id))
-
-    def list_stm(
-        self, character_id: str, since: str | None = None, only_undistilled: bool = False, after_id: int = 0
-    ) -> list[dict[str, Any]]:
+    def list_episodes(self, character_id: str) -> list[dict[str, Any]]:
         """古い順。embedding を含む。"""
-        sql = "SELECT * FROM stm WHERE character_id = ? AND id > ?"
-        params: list[Any] = [character_id, after_id]
-        if since:
-            sql += " AND created_at >= ?"
-            params.append(since)
-        if only_undistilled:
-            sql += " AND distilled = 0"
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM episodes WHERE character_id = ? ORDER BY id", (character_id,)
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def touch_episode(self, episode_id: int, accessed_at: str, grace_until: str, expires_at: str) -> None:
+        """思い出された：アクセス回数を数え、削除猶予と時限を延ばす。"""
+        with self._lock, self._conn:
+            self._conn.execute(
+                "UPDATE episodes SET access_count = access_count + 1, last_accessed_at = ?, grace_until = ?, "
+                "expires_at = ? WHERE id = ?",
+                (accessed_at, grace_until, expires_at, episode_id),
+            )
+
+    def delete_episodes(self, ids: list[int]) -> None:
+        with self._lock, self._conn:
+            self._conn.executemany("DELETE FROM episodes WHERE id = ?", [(i,) for i in ids])
+
+    def delete_expired_episodes(self, character_id: str, now: str) -> int:
+        with self._lock, self._conn:
+            cur = self._conn.execute(
+                "DELETE FROM episodes WHERE character_id = ? AND expires_at <= ?", (character_id, now)
+            )
+        return cur.rowcount
+
+    # --- 印象メモ・プロフィール ---
+
+    def add_memo(self, character_id: str, subject: str, content: str, created_at: str, episode_id: int | None = None) -> int:
+        with self._lock, self._conn:
+            cur = self._conn.execute(
+                "INSERT INTO impression_memos (character_id, subject, content, episode_id, created_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (character_id, subject, content, episode_id, created_at),
+            )
+        return cur.lastrowid
+
+    def list_memos(self, character_id: str, subject: str | None = None) -> list[dict[str, Any]]:
+        sql, params = "SELECT * FROM impression_memos WHERE character_id = ?", [character_id]
+        if subject:
+            sql += " AND subject = ?"
+            params.append(subject)
         with self._lock:
             rows = self._conn.execute(sql + " ORDER BY id", params).fetchall()
         return [dict(r) for r in rows]
 
-    def increment_stm_refs(self, ids: list[int]) -> None:
-        if not ids:
-            return
+    def delete_memos(self, ids: list[int]) -> None:
         with self._lock, self._conn:
-            self._conn.executemany("UPDATE stm SET ref_count = ref_count + 1 WHERE id = ?", [(i,) for i in ids])
+            self._conn.executemany("DELETE FROM impression_memos WHERE id = ?", [(i,) for i in ids])
 
-    def mark_stm_distilled(self, ids: list[int]) -> None:
-        with self._lock, self._conn:
-            self._conn.executemany("UPDATE stm SET distilled = 1 WHERE id = ?", [(i,) for i in ids])
+    def get_profiles(self, character_id: str) -> dict[str, dict[str, Any]]:
+        """対象（subject）→ プロフィール。"""
+        with self._lock:
+            rows = self._conn.execute("SELECT * FROM profiles WHERE character_id = ?", (character_id,)).fetchall()
+        return {r["subject"]: dict(r) for r in rows}
 
-    def delete_stm(self, ids: list[int]) -> None:
+    def save_profile(self, character_id: str, subject: str, impression: str, updated_at: str) -> None:
+        """印象層を更新し、履歴にも残す（更新の結果を後から比較できるように）。"""
         with self._lock, self._conn:
-            self._conn.executemany("DELETE FROM stm WHERE id = ?", [(i,) for i in ids])
-
-    def delete_stm_before(self, character_id: str, before: str) -> int:
-        with self._lock, self._conn:
-            cur = self._conn.execute(
-                "DELETE FROM stm WHERE character_id = ? AND created_at < ?", (character_id, before)
+            self._conn.execute(
+                "INSERT INTO profiles (character_id, subject, impression, updated_at) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(character_id, subject) DO UPDATE SET impression = excluded.impression, "
+                "updated_at = excluded.updated_at",
+                (character_id, subject, impression, updated_at),
             )
-        return cur.rowcount
+            self._conn.execute(
+                "INSERT INTO profile_versions (character_id, subject, impression, created_at) VALUES (?, ?, ?, ?)",
+                (character_id, subject, impression, updated_at),
+            )
 
     # --- 会話の種 ---
 
-    def add_seed(self, character_id: str, content: str, created_at: str) -> int:
+    def add_seed(self, character_id: str, content: str, created_at: str, source: str = "recall") -> int:
         with self._lock, self._conn:
             cur = self._conn.execute(
-                "INSERT INTO seeds (character_id, content, created_at) VALUES (?, ?, ?)",
-                (character_id, content, created_at),
+                "INSERT INTO seeds (character_id, source, content, created_at) VALUES (?, ?, ?, ?)",
+                (character_id, source, content, created_at),
             )
         return cur.lastrowid
 
@@ -368,36 +459,20 @@ class Database:
         with self._lock, self._conn:
             self._conn.execute("UPDATE activity SET ended_at = ? WHERE id = ?", (ended_at, activity_id))
 
-    def list_activity(self, after_id: int = 0) -> list[dict[str, Any]]:
+    def list_activity(self, since: str | None = None) -> list[dict[str, Any]]:
+        """古い順。since を指定すると、その時刻以降まで続いていたものだけ。"""
+        sql, params = "SELECT * FROM activity", []
+        if since:
+            sql += " WHERE ended_at >= ?"
+            params.append(since)
         with self._lock:
-            rows = self._conn.execute("SELECT * FROM activity WHERE id > ? ORDER BY id", (after_id,)).fetchall()
+            rows = self._conn.execute(sql + " ORDER BY id", params).fetchall()
         return [dict(r) for r in rows]
 
     def delete_activity_before(self, before: str) -> int:
         with self._lock, self._conn:
             cur = self._conn.execute("DELETE FROM activity WHERE ended_at < ?", (before,))
         return cur.rowcount
-
-    # --- LTM ---
-
-    def get_ltm(self, character_id: str) -> dict[str, Any] | None:
-        with self._lock:
-            row = self._conn.execute("SELECT * FROM ltm WHERE character_id = ?", (character_id,)).fetchone()
-        return dict(row) if row else None
-
-    def save_ltm(self, character_id: str, conversation: str, self_text: str, updated_at: str) -> None:
-        """LTM を更新し、履歴にも残す（蒸留の結果を後から比較できるように）。"""
-        with self._lock, self._conn:
-            self._conn.execute(
-                "INSERT INTO ltm (character_id, conversation, self, updated_at) VALUES (?, ?, ?, ?) "
-                "ON CONFLICT(character_id) DO UPDATE SET conversation = excluded.conversation, "
-                "self = excluded.self, updated_at = excluded.updated_at",
-                (character_id, conversation, self_text, updated_at),
-            )
-            self._conn.execute(
-                "INSERT INTO ltm_versions (character_id, conversation, self, created_at) VALUES (?, ?, ?, ?)",
-                (character_id, conversation, self_text, updated_at),
-            )
 
     def recent_messages(self, session_id: int, limit: int) -> list[dict[str, Any]]:
         """直近 limit 件を古い順で返す。"""

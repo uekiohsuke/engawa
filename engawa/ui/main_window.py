@@ -119,7 +119,7 @@ class MainWindow(QMainWindow):
             self._watch_button.setObjectName("focusButton")
             self._watch_button.setCheckable(True)
             self._watch_button.setToolTip(
-                "前面のウィンドウのタイトルとアプリ名を、会話の種の材料にする\n"
+                "前面のウィンドウのタイトルとアプリ名を、即興の話題の材料にする\n"
                 "（集中モード中・除外アプリ・縁側自身のウィンドウは記録しない）"
             )
             self._watch_button.toggled.connect(self._set_watching)
@@ -363,7 +363,7 @@ class MainWindow(QMainWindow):
         if self._watcher is not None:
             self._watcher.focus_mode = enabled  # 集中モード中は画面を見ない
 
-    # --- 画面を見る（会話の種の材料） ---
+    # --- 画面を見る（即興の話題の材料） ---
 
     def _set_watching(self, enabled: bool) -> None:
         self._watch_button.setText(f"画面を見る：{'ON' if enabled else 'OFF'}")

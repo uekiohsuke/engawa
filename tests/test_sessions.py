@@ -39,23 +39,33 @@ async def test_seeded_dialogue_falls_back_to_main(tmp_path):
 # --- サブスレッドと記憶 ---
 
 
-async def test_sub_session_records_stm_but_does_not_recall(tmp_path):
-    env = Env(tmp_path, at(12), history_window=1)
-    await env.say("昨日カレーを作ったけど辛すぎた")
-    await env.say("今日はいい天気")
-    env.db.save_ltm("sui", "マスターはカレーが好き。", "", at(12).isoformat())
+async def test_sub_session_searches_episodes_more_strictly(tmp_path):
+    env = Env(tmp_path, at(12))
+    await env.add_episode("昨日マスターがカレーを作ったけど辛すぎたらしい", happened=at(20, day=27))
+    env.db.save_profile("sui", "user", "マスターはカレーが好き。", at(1).isoformat())
     sub = await env.conversation.create_sub_session("sui", "料理")
-    await env.conversation.post_user_message(SUI, sub["id"], "昨日カレーを作ったけど辛すぎたんだよね")
+
+    async def recalled(session_id: int, text: str) -> bool:
+        await env.conversation.post_user_message(SUI, session_id, text)
+        await env.settle()
+        return "## 思い出したこと" in env.llm.chats[-1][0]["content"]
+
+    # 少し関係する程度（類似度0.62）なら、メインでは思い出すが、サブでは出さない
+    assert not await recalled(sub["id"], "カレー作ったけど辛すぎたかも")
+    assert "マスターはカレーが好き。" in env.llm.chats[-1][0]["content"]  # 印象層はどこでも入る
+    assert await recalled(env.sessions["main"], "カレー作ったけど辛すぎたかも")
+    # はっきり関係する（類似度0.67）なら、サブでも思い出す
+    assert await recalled(sub["id"], "昨日カレーを作ったけど辛すぎたんだよね")
+
+
+async def test_sub_session_conversation_becomes_episodes(tmp_path):
+    env = Env(tmp_path, at(12))
+    sub = await env.conversation.create_sub_session("sui", "料理")
+    await env.conversation.post_user_message(SUI, sub["id"], "カレーの話")
     await env.settle()
-
-    system = env.llm.chats[-1][0]["content"]
-    assert "## 思い出したこと" not in system  # サブは STM を参照しない
-    assert "マスターはカレーが好き。" in system  # LTM は参照する
-    assert any(s["content"] == "昨日カレーを作ったけど辛すぎたんだよね" for s in env.stm())  # 記録はする
-
-    # メインでは、サブでの発言も思い出せる
-    await env.say("昨日カレーを作ったけど辛すぎたんだよね、また作る")
-    assert "昨日カレーを作ったけど辛すぎたんだよね" in env.llm.chats[-1][0]["content"]
+    await env.memory.adjust("sui")
+    assert [e["session_id"] for e in env.episodes()] == [sub["id"]]
+    assert "サブチャンネル「料理」" in env.llm.prompts[-1]
 
 
 # --- アーカイブ ---

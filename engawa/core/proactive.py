@@ -13,7 +13,8 @@
   対話で一定時間返事がなければ、同じ内容を #main にメッセージとして送り直す
 
 メッセージの送り先は、会話の種を使ったら #main、即興なら新しいサブスレッド（仕様4-1）。
-眠りに落ちたら（会話中ならおやすみを言ってから）、放置されたサブスレッドのアーカイブと夜間蒸留を行う。
+即興のときは、直近の画面の様子を話題の材料として添える（仕様8-4）。
+眠りに落ちたら（会話中ならおやすみを言ってから）、放置されたサブスレッドのアーカイブと記憶の整理を行う。
 """
 
 from __future__ import annotations
@@ -32,7 +33,7 @@ from engawa.core.conversation import ConversationService, should_say_goodnight
 from engawa.core.db import Database
 from engawa.core.events import EventHub
 from engawa.core.llm import JUDGE_PREFIX, TITLE_PREFIX, LLMClient
-from engawa.core.memory import MemoryService
+from engawa.core.memory import MemoryService, format_activity_line
 from engawa.core.state import (
     AVAILABILITY_BOTH,
     AVAILABILITY_LABELS,
@@ -61,7 +62,7 @@ TRIGGER_LABELS = {
     "boredom": "暇度",
     "fatigue": "疲労の閾値クロス",
     "sleepiness": "就寝前会話の閾値クロス",
-    "memory": "未整理の会話・画面の活動",
+    "memory": "まだ記憶にしていない会話",
 }
 MEMORY_TRIGGER = "memory"
 
@@ -81,8 +82,7 @@ MESSAGE_ONLY_FACTOR = 0.5  # 取り込み中は話しかけにくい
 CONVERSATION_COOLDOWN = timedelta(minutes=10)
 PROACTIVE_COOLDOWN = timedelta(minutes=30)  # 返事のない話しかけが続くと倍々に延びる
 MAX_UNANSWERED = 3
-MEMORY_MIN_UNPROCESSED = 4  # 未整理の会話がこれだけ溜まったら、記憶調整のきっかけとして判定層に回す
-MEMORY_MIN_ACTIVITY_MINUTES = 30  # 未整理の画面の活動がこれだけ溜まっても、記憶調整のきっかけにする
+MEMORY_MIN_UNPROCESSED = 4  # まだ記憶にしていない発言がこれだけ溜まったら、記憶調整のきっかけとして判定層に回す
 MEMORY_PROBABILITY = 0.5
 
 NEW_SUB_TITLE = "新しい話題"  # 名前が付くまでの仮の名前
@@ -116,7 +116,6 @@ def gate(
     since_proactive: timedelta | None,
     unanswered: int,
     unprocessed: int = 0,
-    unprocessed_activity_minutes: float = 0.0,
 ) -> GateResult:
     """判定層に回す確率を求める。"""
     if availability == AVAILABILITY_SLEEPING:
@@ -125,7 +124,7 @@ def gate(
         return GateResult(blocked="会話した直後")
 
     triggers: dict[str, float] = {}
-    if unprocessed >= MEMORY_MIN_UNPROCESSED or unprocessed_activity_minutes >= MEMORY_MIN_ACTIVITY_MINUTES:
+    if unprocessed >= MEMORY_MIN_UNPROCESSED:
         triggers[MEMORY_TRIGGER] = MEMORY_PROBABILITY
 
     speak_blocked = None
@@ -180,7 +179,6 @@ def build_judge_messages(
     since_conversation: timedelta | None,
     now: datetime,
     unprocessed: int = 0,
-    unprocessed_activity_minutes: float = 0.0,
 ) -> list[dict[str, str]]:
     p = character.personality
     triggers = list(triggers)
@@ -188,7 +186,7 @@ def build_judge_messages(
     allow_memory = MEMORY_TRIGGER in triggers
     actions = [
         *([f'"{ACTION_SPEAK}"（マスターに話しかける）'] if candidates else []),
-        *([f'"{ACTION_MEMORY}"（ひとりで最近の会話やマスターの様子を振り返り、記憶を整理する）'] if allow_memory else []),
+        *([f'"{ACTION_MEMORY}"（ひとりで最近の会話を振り返り、記憶を整理する）'] if allow_memory else []),
         f'"{ACTION_SILENT}"（何もしない）',
     ]
     prompt = "\n".join(
@@ -201,7 +199,7 @@ def build_judge_messages(
             f"- 応答可能状態：{AVAILABILITY_LABELS[availability]}",
             f"- 性格：疲労反応＝{p.fatigue_response}、眠気反応＝{p.sleepiness_response}、暇度感度＝×{p.boredom_sensitivity}",
             f"- 最後にマスターと会話したのは：{_format_elapsed(since_conversation)}",
-            f"- まだ振り返っていない会話：{unprocessed}件、マスターの画面の様子：約{int(unprocessed_activity_minutes)}分ぶん",
+            f"- まだ振り返っていない発言：{unprocessed}件",
             f"- 今回のきっかけ：{'、'.join(TRIGGER_LABELS[t] for t in triggers)}",
             *([f"- 話しかける場合の意図の候補：{'／'.join(f'{i}（{INTENTS[i]}）' for i in candidates)}"] if candidates else []),
             f"- 選べる行動：{'、'.join(actions)}",
@@ -233,13 +231,29 @@ async def judge(
     return Decision(ACTION_SILENT, None, reason)
 
 
-def proactive_instruction(intent: str, since_conversation: timedelta | None, seed: str | None = None) -> str:
+def proactive_instruction(
+    intent: str,
+    since_conversation: timedelta | None,
+    seed: str | None = None,
+    activity: list[dict[str, Any]] | None = None,
+) -> str:
+    """話しかけの指示。会話の種が無い（即興）ときは、直近の画面の様子を話題の材料として添える（仕様8-4）。"""
     elapsed = (
         "マスターとはまだ話したことがない。"
         if since_conversation is None
         else f"最後にマスターと話したのは{_format_elapsed(since_conversation)}。"
     )
-    topic = f"話題：前から話してみたかった「{seed}」について振ること。" if seed else ""
+    if seed:
+        topic = f"話題：前から話してみたかった「{seed}」について振ること。"
+    elif activity:
+        topic = (
+            "話題はその場で考えてよい。参考までに、隣からちらっと見えたマスターの画面（前面にあったウィンドウ）："
+            + "／".join(format_activity_line(a) for a in activity)
+            + "。これを話題にするなら、見えた物事のひとつに軽く興味を持つ程度にし、"
+            "見張っているような言い方や、行動を並べて言い当てるようなことはしない。話題にしなくてもよい。"
+        )
+    else:
+        topic = ""
     return (
         f"ここはあなたから話しかける場面。意図：{INTENTS[intent]}。{elapsed}{topic}"
         "状況と今の調子に合った、自然な話しかけの一言を1〜2文で言うこと。この指示には触れないこと。"
@@ -328,7 +342,6 @@ class ProactiveService:
         availability = self._state.availability(character_id)
         since_conversation = self._since(self._db.last_message(character_id), now)
         unprocessed = len(self._memory.unprocessed(character_id)) if self._memory else 0
-        activity_minutes = self._memory.unprocessed_activity_minutes(character_id) if self._memory else 0.0
         times = self._proactive_times[character_id]
         result = gate(
             state=self._state.state(character_id),
@@ -339,11 +352,10 @@ class ProactiveService:
             since_proactive=now - times[-1] if times else None,
             unanswered=self._unanswered(character_id),
             unprocessed=unprocessed,
-            unprocessed_activity_minutes=activity_minutes,
         )
         if force and availability != AVAILABILITY_SLEEPING:
             triggers = {"boredom": BOREDOM_PROBABILITY_SCALE * self._state.state(character_id).boredom**2}
-            if unprocessed or activity_minutes:
+            if unprocessed:
                 triggers[MEMORY_TRIGGER] = MEMORY_PROBABILITY
             result = GateResult(1.0, result.triggers | triggers)
         elif result.blocked or not result.triggers or self._rand() >= result.probability:
@@ -359,7 +371,6 @@ class ProactiveService:
             since_conversation,
             now,
             unprocessed,
-            activity_minutes,
         )
         decision = await judge(self._judge_llm, messages, candidates, allow_memory)
         triggers = "、".join(f"{TRIGGER_LABELS[t]} {p:.2f}" for t, p in result.triggers.items())
@@ -432,7 +443,8 @@ class ProactiveService:
         if intent == FAREWELL:
             instruction = FAREWELL_INSTRUCTION
         else:
-            instruction = proactive_instruction(intent, since_conversation, seed["content"] if seed else None)
+            activity = self._memory.recent_activity() if self._memory and not seed else None
+            instruction = proactive_instruction(intent, since_conversation, seed["content"] if seed else None, activity)
         message = await self._conversation.speak(
             character, session_id, instruction, topic=seed["content"] if seed else None
         )
@@ -495,9 +507,9 @@ class ProactiveService:
             await self.speak(character_id, FAREWELL, session_id=last_user["session_id"])
         await self._conversation.archive_stale_sessions(character_id)
         if self._memory:
-            # 睡眠中に夜間蒸留（仕様8-2）。おやすみの一言も含めるため、その後に行う
+            # 睡眠中の整理（仕様8-3）。おやすみの一言も記憶にするため、その後に行う
             try:
-                await self._memory.distill(character_id)
+                await self._memory.consolidate(character_id)
             except Exception:
-                log.exception("distillation failed")
-                await self._state.record(character_id, "memory", "夜間蒸留に失敗した（ログを参照）")
+                log.exception("consolidation failed")
+                await self._state.record(character_id, "memory", "睡眠中の整理に失敗した（ログを参照）")

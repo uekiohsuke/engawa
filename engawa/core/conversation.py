@@ -12,7 +12,7 @@ from engawa.core.db import Database
 from engawa.core.events import EventHub
 from engawa.core.expression import ExpressionFilter, expression_section
 from engawa.core.llm import INSTRUCTION_PREFIX, ChatMessage, LLMClient
-from engawa.core.memory import RECALL_SESSION_KINDS, MemoryService
+from engawa.core.memory import MemoryService
 from engawa.core.state_service import StateService
 from engawa.core.timewords import describe_elapsed, message_stamp
 
@@ -110,7 +110,7 @@ class ConversationService:
     ) -> str:
         sections = [character.system_prompt()]
         if self._memory:
-            sections.append(self._memory.ltm_section(character.id))
+            sections.append(self._memory.profile_section(character.id))
         sections.append(self._state.prompt_section(character.id))
         sections.append(time_section(elapsed))
         if self._memory and related:
@@ -171,12 +171,10 @@ class ConversationService:
             if not was_asleep and self._just_fell_asleep_while_talking(character.id, message):
                 # おやすみの一言（能動発話側が生成する）をこの発言への返事にする
                 self._busy.discard(session_id)
-                await self._remember(character, session_id, message)
                 return message
-            # 睡眠中は無反応。定型文の表示のみ（仕様6-3）
+            # 睡眠中は無反応。定型文の表示のみ（仕様6-3）。発言は短期記憶として残り、後でエピソード化される
             notice = self._add_message(session_id, "system", asleep_notice(character))
             await self._hub.publish("message.created", message=notice)
-            await self._remember(character, session_id, message)
             self._busy.discard(session_id)
             return message
         await self._state.on_user_message(character.id)
@@ -210,28 +208,21 @@ class ConversationService:
         await self._hub.publish("message.created", message=message)
         return message
 
-    async def _remember(
-        self, character: Character, session_id: int, message: dict[str, Any], embedding: list[float] | None = None
-    ) -> None:
-        if self._memory:
-            await self._memory.record_message(character.id, message, embedding)
-
     async def _recall(
         self, character: Character, session_id: int, query: dict[str, Any] | None
     ) -> list[dict[str, Any]]:
-        """query（ユーザー発言や会話の種）に関連するSTMを探す。ユーザー発言ならSTMへの登録もここで行う。"""
+        """query（ユーザー発言や会話の種）に関連するエピソードを探す（仕様8-5：毎ターン、コードが自動で行う）。
+
+        どのスレッドからでも検索する。サブスレッドは特定の話題用なので、はっきり関係するものだけを出す。
+        """
         if not self._memory or query is None:
             return []
-        # サブスレッドは STM を参照しない（仕様4-1）。発言の記録は行う
-        uses_stm = self._db.get_session(session_id)["kind"] in RECALL_SESSION_KINDS
-        vector = await self._memory.embed_query(query["content"]) if uses_stm else None
-        if query.get("id"):  # ユーザー発言
-            await self._remember(character, session_id, query, vector)
-        if not uses_stm:
-            return []
-        # 直近の会話履歴としてそのまま渡す発言は、思い出す対象から外す
-        window = [m["id"] for m in self._db.recent_messages(session_id, self._history_window)]
-        return await self._memory.retrieve(character.id, vector, exclude_message_ids=window)
+        vector = await self._memory.embed_query(query["content"])
+        # 会話履歴としてそのまま渡す発言から作られたエピソードは、思い出す対象から外す
+        history = self._db.recent_messages(session_id, self._history_window)
+        window = (session_id, history[0]["id"]) if history else None
+        kind = self._db.get_session(session_id)["kind"]
+        return await self._memory.retrieve(character.id, vector, kind, window)
 
     async def _generate(
         self,
@@ -268,7 +259,6 @@ class ConversationService:
                 raise RuntimeError("LLM returned an empty reply")
             message = self._add_message(session_id, "character", reply, tags.expression)
             await self._hub.publish("message.completed", message=message)
-            await self._remember(character, session_id, message)
             return message
         except Exception as e:
             log.exception("generation failed (session %s)", session_id)

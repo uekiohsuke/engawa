@@ -26,7 +26,7 @@ INSTRUCTION_PREFIX = "【指示】"
 # JSON で答えさせる各処理のプロンプト先頭の印（モックが答え分けるのにも使う）
 JUDGE_PREFIX = "【判定】"
 ADJUST_PREFIX = "【記憶調整】"
-DISTILL_PREFIX = "【蒸留】"
+PROFILE_PREFIX = "【印象更新】"
 TITLE_PREFIX = "【題名】"
 
 
@@ -111,6 +111,26 @@ MOCK_REPLIES = [
 MOCK_PROACTIVE_REPLY = "ねえマスター、ちょっといい？ ……別に用ってわけじゃないけど。"
 
 
+def mock_adjust(prompt: str) -> dict[str, Any]:
+    """記憶調整のモック：会話ごとに、渡された発言全体を1つのエピソードにする（続いている会話は無いとみなす）。"""
+    episodes = []
+    for block in re.split(r"^### 会話", prompt, flags=re.MULTILINE)[1:]:
+        session = int(re.match(r"(\d+)", block).group(1))
+        ids = [int(i) for i in re.findall(r"^#(\d+) ", block, flags=re.MULTILINE)]
+        if ids:
+            episodes.append(
+                {
+                    "session": session,
+                    "from": ids[0],
+                    "to": ids[-1],
+                    "content": f"(mock) 発言{len(ids)}件ぶんのやりとり",
+                    "about_master": "(mock) 話しかけてくれるのが嬉しい",
+                    "about_self": None,
+                }
+            )
+    return {"episodes": episodes, "ongoing": [], "recall_seeds": ["(mock) この前の話の続きを聞いてみる"], "drop_seeds": []}
+
+
 class MockLLMClient:
     """LLM なしで動作確認するためのモック。
 
@@ -144,9 +164,9 @@ class MockLLMClient:
     async def complete_json(self, messages: list[ChatMessage]) -> dict[str, Any]:
         prompt = messages[-1]["content"]
         if prompt.startswith(ADJUST_PREFIX):
-            return {"seeds": ["(mock) この前の話の続きを聞いてみる"], "drop_seeds": [], "self_memories": ["(mock) マスターと話すのは楽しい"]}
-        if prompt.startswith(DISTILL_PREFIX):
-            return {"conversation": "(mock) マスターとよく話した。", "self": "(mock) 今日も隣にいた。"}
+            return mock_adjust(prompt)
+        if prompt.startswith(PROFILE_PREFIX):
+            return {"impression": "(mock) よく話しかけてくれる。", "topic_seeds": ["(mock) 最近ハマっていることを聞く"]}
         if prompt.startswith(TITLE_PREFIX):
             return {"title": "(mock) 話題"}
         return {"action": "speak", "intent": "", "reason": "(mock) 常に話しかける"}

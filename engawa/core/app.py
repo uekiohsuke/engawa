@@ -149,18 +149,18 @@ def create_app(
         require_character(character_id)
         return await memory.adjust(character_id)
 
-    @app.post("/characters/{character_id}/memory/distill")
-    async def distill_memory(character_id: str):
-        """調整用：睡眠を待たずに夜間蒸留を行う。"""
+    @app.post("/characters/{character_id}/memory/consolidate")
+    async def consolidate_memory(character_id: str):
+        """調整用：睡眠を待たずに睡眠中の整理（残りのエピソード化・印象層の更新）を行う。"""
         require_character(character_id)
-        result = await memory.distill(character_id)
+        result = await memory.consolidate(character_id)
         if result is None:
-            raise HTTPException(409, "distillation is already running")
+            raise HTTPException(409, "consolidation is already running")
         return result
 
     @app.post("/activity", status_code=204)
     async def post_activity(body: ActivityObservation):
-        """UI が観測した前面ウィンドウ（会話の種の材料）。除外・集中モードの判断は UI 側で済ませてから送られる。"""
+        """UI が観測した前面ウィンドウ（即興の話題の材料）。除外・集中モードの判断は UI 側で済ませてから送られる。"""
         await memory.record_activity(body.app, body.title)
 
     @app.get("/focus")

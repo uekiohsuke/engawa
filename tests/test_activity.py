@@ -7,12 +7,10 @@ from fastapi.testclient import TestClient
 import engawa.ui.activity as activity_module
 from engawa.config import Settings
 from engawa.core.app import create_app
-from engawa.core.llm import ADJUST_PREFIX, MockEmbedder, MockLLMClient
+from engawa.core.llm import MockEmbedder, MockLLMClient
 from engawa.core.memory import ACTIVITY_TITLE_MAX
-from engawa.core.proactive import gate
-from engawa.core.state import CharacterState
 from engawa.ui.activity import ActivityWatcher, foreground_window, is_excluded
-from test_memory import SUI, Env, FakeClock, RecordingLLM, at
+from test_memory import SUI, Env, FakeClock, at
 
 
 async def observe(env: Env, app: str, title: str, minutes: float = 0.5) -> None:
@@ -53,47 +51,48 @@ async def test_long_titles_are_truncated_and_still_merged(tmp_path):
     assert len(row["title"]) == ACTIVITY_TITLE_MAX
 
 
-# --- 記憶調整への組み込み ---
+# --- 即興の話題の材料（仕様8-4） ---
 
 
-async def test_adjust_uses_activity_and_advances_cursor(tmp_path):
-    llm = RecordingLLM(adjust={"seeds": ["さっき見てた猫の動画のこと"], "drop_seeds": [], "self_memories": []})
-    env = Env(tmp_path, at(12), llm=llm)
+async def test_impromptu_speech_gets_recent_activity_as_material(tmp_path):
+    env = Env(tmp_path, at(11, 20))
+    await observe(env, "Code.exe", "昔の作業", minutes=5)  # 30分より前のものは渡さない
+    env.clock.now = at(11, 40)
     for _ in range(5):
         await observe(env, "chrome.exe", "猫の動画 - YouTube - Google Chrome")
     await observe(env, "explorer.exe", "ダウンロード")  # すぐ切り替えたものは渡さない
-    assert env.memory.unprocessed_activity_minutes("sui") == pytest.approx(2.0)
 
-    result = await env.memory.adjust("sui")
-    prompt = next(p for p in llm.prompts if p.startswith(ADJUST_PREFIX))
-    assert "[9/28 12:00〜12:02] chrome.exe — 猫の動画 - YouTube - Google Chrome" in prompt
-    assert "ダウンロード" not in prompt
-    assert "見張っているような話題にしないこと" in prompt
-    assert result["processed_activity"] == 2
-    assert env.memory.unprocessed_activity("sui") == []
-    assert [s["content"] for s in env.db.list_seeds("sui")] == ["さっき見てた猫の動画のこと"]
+    await env.proactive.speak("sui", "暇つぶし")
+
+    instruction = env.llm.chats[-1][-1]["content"]
+    assert "[11:40〜11:42] chrome.exe — 猫の動画 - YouTube - Google Chrome" in instruction
+    assert "ダウンロード" not in instruction and "昔の作業" not in instruction
+    assert "見張っているような言い方" in instruction
 
 
-def test_gate_triggers_memory_adjustment_on_accumulated_activity():
-    kwargs = dict(
-        state=CharacterState(),
-        availability="both",
-        personality=SUI.personality,
-        crossings=(),
-        since_conversation=timedelta(hours=2),
-        since_proactive=None,
-        unanswered=0,
-    )
-    assert gate(**kwargs, unprocessed_activity_minutes=30).triggers == {"memory": 0.5}
-    assert gate(**kwargs, unprocessed_activity_minutes=29).triggers == {}
+async def test_seeded_speech_does_not_use_activity(tmp_path):
+    env = Env(tmp_path, at(12))
+    for _ in range(5):
+        await observe(env, "chrome.exe", "猫の動画")
+    env.db.add_seed("sui", "京都旅行の話", at(11).isoformat())
+    await env.proactive.speak("sui", "暇つぶし")
+    assert "猫の動画" not in env.llm.chats[-1][-1]["content"]
 
 
-async def test_distill_deletes_expired_activity(tmp_path):
-    env = Env(tmp_path, at(12) - timedelta(days=4))
+async def test_activity_is_not_a_memory_trigger_anymore(tmp_path):
+    env = Env(tmp_path, at(12))
+    for _ in range(5):
+        await observe(env, "chrome.exe", "猫の動画", minutes=10)
+    assert env.memory.unprocessed("sui") == []
+    assert "画面" not in env.memory.build_adjust_messages(SUI, [], [])[0]["content"]
+
+
+async def test_consolidate_deletes_old_activity(tmp_path):
+    env = Env(tmp_path, at(12) - timedelta(days=2))
     await observe(env, "Code.exe", "古い作業")
     env.clock.now = at(23)
     await observe(env, "Code.exe", "今日の作業")
-    result = await env.memory.distill("sui")
+    result = await env.memory.consolidate("sui")
     assert result["expired_activity"] == 1
     assert [r["title"] for r in env.db.list_activity()] == ["今日の作業"]
 
@@ -104,7 +103,7 @@ def test_activity_api(tmp_path):
     with TestClient(app) as client:
         assert client.post("/activity", json={"app": "Code.exe", "title": "engawa"}).status_code == 204
         assert client.post("/activity", json={"app": "", "title": "x"}).status_code == 422
-        assert client.get("/characters/sui/memory").json()["unprocessed_activity"] == 1
+        assert [a["title"] for a in app.state.services["db"].list_activity()] == ["engawa"]
 
 
 # --- UI 側の観測 ---
