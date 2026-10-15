@@ -231,6 +231,18 @@ def create_llm(settings: Settings) -> LLMClient:
     raise ValueError(f"unknown ENGAWA_LLM_BACKEND: {settings.llm_backend}")
 
 
+MEMORY_TIMEOUT = 600.0  # 27B級で発言の多い記憶調整は数分かかることがある
+
+
+def create_memory_llm(settings: Settings) -> LLMClient:
+    """記憶調整・睡眠中の整理用のクライアント。"""
+    if settings.llm_backend == "ollama":
+        return OllamaClient(settings.llm_url, settings.memory_model, "none", timeout=MEMORY_TIMEOUT)
+    if settings.llm_backend == "mock":
+        return MockLLMClient()
+    raise ValueError(f"unknown ENGAWA_LLM_BACKEND: {settings.llm_backend}")
+
+
 def create_judge_llm(settings: Settings) -> LLMClient:
     """判定層用の軽量モデルのクライアント。"""
     if settings.llm_backend == "ollama":

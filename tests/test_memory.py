@@ -503,6 +503,23 @@ def test_v1_memory_tables_are_dropped(tmp_path):
     assert [m["content"] for m in db.unmemorized_messages("sui")] == ["前からの会話"]  # 会話ログは残る
 
 
+# --- 記憶用のモデル ---
+
+
+def test_memory_uses_its_own_model(monkeypatch):
+    from engawa.config import load_settings
+    from engawa.core.llm import MEMORY_TIMEOUT, OllamaClient, create_llm, create_memory_llm
+
+    monkeypatch.setenv("ENGAWA_LLM_BACKEND", "ollama")
+    monkeypatch.setenv("ENGAWA_LLM_MODEL", "gemma4:12b")
+    monkeypatch.setenv("ENGAWA_MEMORY_MODEL", "qwen3.8:27b-mlx")
+    settings = load_settings()
+    memory_llm, chat_llm = create_memory_llm(settings), create_llm(settings)
+    assert isinstance(memory_llm, OllamaClient)
+    assert (memory_llm.name, chat_llm.name) == ("ollama:qwen3.8:27b-mlx", "ollama:gemma4:12b")
+    assert memory_llm._timeout == MEMORY_TIMEOUT
+
+
 # --- API ---
 
 

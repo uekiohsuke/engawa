@@ -14,7 +14,7 @@ from engawa.config import Settings, load_settings
 from engawa.core.conversation import ConversationService, SessionBusyError
 from engawa.core.db import Database
 from engawa.core.events import EventHub
-from engawa.core.llm import Embedder, LLMClient, create_embedder, create_judge_llm, create_llm
+from engawa.core.llm import Embedder, LLMClient, create_embedder, create_judge_llm, create_llm, create_memory_llm
 from engawa.core.memory import MemoryService
 from engawa.core.proactive import ProactiveService
 from engawa.core.state_service import Clock, StateService, system_clock
@@ -50,15 +50,18 @@ def create_app(
     judge_llm: LLMClient | None = None,
     rand: Callable[[], float] = random.random,
     embedder: Embedder | None = None,
+    memory_llm: LLMClient | None = None,
 ) -> FastAPI:
     settings = settings or load_settings()
+    # LLM を差し替えて渡されたとき（テストなど）は、記憶も同じものを使う
+    memory_llm = memory_llm or llm or create_memory_llm(settings)
     llm = llm or create_llm(settings)
     db = db or Database(settings.db_path)
     hub = EventHub()
     judge_llm = judge_llm or create_judge_llm(settings)
     embedder = embedder or create_embedder(settings)
     state = StateService(db, hub, CHARACTERS.values(), clock, settings.state_tick_seconds)
-    memory = MemoryService(db, hub, state, llm, embedder, CHARACTERS.values(), rand)
+    memory = MemoryService(db, hub, state, memory_llm, embedder, CHARACTERS.values(), rand)
     conversation = ConversationService(db, llm, hub, state, settings.history_window, memory)
     proactive = ProactiveService(
         db,
