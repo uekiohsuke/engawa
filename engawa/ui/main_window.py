@@ -330,6 +330,7 @@ class MainWindow(QMainWindow):
         if not content or not self._current_session or self._current_session["id"] in self._busy_sessions:
             return
         self._input.clear()
+        self._message_view.scroll_to_bottom()  # 自分の発言と返事を一番下で追う
         self._client.post(
             f"/sessions/{self._current_session['id']}/messages",
             {"content": content},

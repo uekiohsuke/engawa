@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QScrollArea, QVBoxLayout, QWidget
 
@@ -106,8 +106,15 @@ class MessageRow(QFrame):
         self.body.setText(self.body.text() + delta)
 
 
+STICK_MARGIN = 24  # 一番下からこれだけの範囲にいれば「一番下にいる」とみなす
+
+
 class MessageView(QScrollArea):
-    """メッセージの縦並び表示。生成中のキャラクター発言はストリーム表示する。"""
+    """メッセージの縦並び表示。生成中のキャラクター発言はストリーム表示する。
+
+    一番下にいる間は、発言が増えたり折り返しの高さが決まったりしても一番下に揃え続ける。
+    上にスクロールして読んでいる間は、新しい発言が来ても動かさない。
+    """
 
     def __init__(self):
         super().__init__()
@@ -115,6 +122,7 @@ class MessageView(QScrollArea):
         self._character_avatar: QPixmap | None = None
         self._user_avatar = icon_pixmap(None, AVATAR_SIZE, USER_NAME, COLORS["bg_hover"])
         self._streaming: MessageRow | None = None
+        self._stick_to_bottom = True
         self.setWidgetResizable(True)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         container = QWidget()
@@ -124,6 +132,9 @@ class MessageView(QScrollArea):
         self._layout.setSpacing(0)
         self._layout.addStretch(1)
         self.setWidget(container)
+        bar = self.verticalScrollBar()
+        bar.rangeChanged.connect(self._on_range_changed)
+        bar.valueChanged.connect(self._on_value_changed)
 
     def set_character(self, character: dict) -> None:
         self._character_name = character["name"]
@@ -138,6 +149,7 @@ class MessageView(QScrollArea):
             if item.widget():
                 item.widget().deleteLater()
         self._streaming = None
+        self._stick_to_bottom = True
 
     def add_message(self, message: dict) -> None:
         if message["role"] == "character":
@@ -159,7 +171,6 @@ class MessageView(QScrollArea):
         if self._streaming is None:
             self.start_stream()
         self._streaming.append_text(delta)
-        self._scroll_to_bottom()
 
     def finish_stream(self, message: dict) -> None:
         if self._streaming is None:
@@ -167,7 +178,6 @@ class MessageView(QScrollArea):
             return
         self._streaming.set_text(message["content"])
         self._streaming = None
-        self._scroll_to_bottom()
 
     def abort_stream(self) -> None:
         if self._streaming is not None:
@@ -176,8 +186,17 @@ class MessageView(QScrollArea):
 
     def _append_row(self, row: QWidget) -> None:
         self._layout.addWidget(row)
-        self._scroll_to_bottom()
 
-    def _scroll_to_bottom(self) -> None:
-        # レイアウト反映後にスクロールさせる
-        QTimer.singleShot(0, lambda: self.verticalScrollBar().setValue(self.verticalScrollBar().maximum()))
+    def scroll_to_bottom(self) -> None:
+        """一番下に揃え、以後も一番下に付いていく。"""
+        self._stick_to_bottom = True
+        bar = self.verticalScrollBar()
+        bar.setValue(bar.maximum())
+
+    def _on_range_changed(self, _minimum: int, maximum: int) -> None:
+        # 高さはレイアウトの反映や折り返しの計算のたびに少しずつ変わるので、そのつど揃え直す
+        if self._stick_to_bottom:
+            self.verticalScrollBar().setValue(maximum)
+
+    def _on_value_changed(self, value: int) -> None:
+        self._stick_to_bottom = value >= self.verticalScrollBar().maximum() - STICK_MARGIN
