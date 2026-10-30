@@ -9,6 +9,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
+# ペルソナは persona_file の中身を、{user} をユーザーの呼び名に置き換えてシステムプロンプトの先頭に置く。
+# 旧版は *.md.old として残しておく（読み込まれず、パッケージにも含まれないバックアップ）
 PERSONA_DIR = Path(__file__).resolve().parent / "persona"
 ASSET_DIR = Path(__file__).resolve().parent / "assets"
 
@@ -61,12 +63,15 @@ class Character:
     id: str
     name: str
     persona_file: str
+    # プロンプトでユーザーを指すときの名前（「〇〇と話したい」「〇〇について」など）。
+    # 話しかけるときの二人称はペルソナに書く。ここはあくまで地の文での呼び名
+    user_name: str
     personality: Personality = field(default_factory=Personality)
     rhythm: RhythmProfile = field(default_factory=lambda: RhythmProfile(wake_hour=8.0, bedtime_hour=24.0))
     images: CharacterImages = field(default_factory=CharacterImages)
 
     def system_prompt(self) -> str:
-        return (PERSONA_DIR / self.persona_file).read_text(encoding="utf-8")
+        return (PERSONA_DIR / self.persona_file).read_text(encoding="utf-8").replace("{user}", self.user_name)
 
 
 CHARACTERS: dict[str, Character] = {
@@ -74,6 +79,7 @@ CHARACTERS: dict[str, Character] = {
         id="sui",
         name="翠",
         persona_file="sui.md",
+        user_name="ousuke",
         personality=Personality(
             boredom_sensitivity=1.0,
             fatigue_response="静か",

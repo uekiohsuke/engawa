@@ -162,7 +162,7 @@ async def test_messages_stay_short_term_until_episodized(tmp_path):
     # 画面の履歴（会話ログ）は消えない
     assert len(env.db.recent_messages(env.sessions["main"], 10)) == 2
     prompt = next(p for p in env.llm.prompts if p.startswith(ADJUST_PREFIX))
-    assert "マスター：昨日カレーを作ったよ" in prompt and "（まだ続いているかもしれない）" in prompt
+    assert f"{SUI.user_name}：昨日カレーを作ったよ" in prompt and "（まだ続いているかもしれない）" in prompt
 
 
 async def test_ongoing_conversation_is_not_episodized(tmp_path):
@@ -422,7 +422,7 @@ async def test_judge_can_choose_memory_adjustment(tmp_path):
 
 async def test_consolidate_updates_profiles_from_memos(tmp_path):
     def profile(prompt):
-        about_master = "マスターについての印象" in prompt
+        about_master = f"{SUI.user_name}についての印象" in prompt
         return {
             "impression": "カレーが好き。" if about_master else "隣にいるのが好き。",
             "topic_seeds": ["カレーの新しいレシピを聞く"],
@@ -449,7 +449,7 @@ async def test_consolidate_updates_profiles_from_memos(tmp_path):
     ]
 
     system = env.conversation.build_system_prompt(SUI)
-    assert "## 記憶" in system and "### マスターについて\nカレーが好き。" in system
+    assert "## 記憶" in system and f"### {SUI.user_name}について\nカレーが好き。" in system
 
 
 async def test_consolidate_keeps_memos_when_profile_update_fails(tmp_path):

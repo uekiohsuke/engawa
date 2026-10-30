@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (
 from engawa.ui.client import CoreClient
 from engawa.ui.widgets import COLORS, format_time
 
-SUBJECT_LABELS = {"user": "マスターについて", "self": "自分について"}
+SUBJECT_LABELS = {"user": "あなたについて", "self": "自分について"}
 SEED_SOURCES = {"recall": "思い出し", "topic": "話題作成"}
 SESSION_LABELS = {"dialogue": "対話", "main": "#main", "sub": "サブ"}
 

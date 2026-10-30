@@ -97,7 +97,7 @@ def test_prompt_section_reflects_personality_tags():
     section = engine.prompt_section(at(23))
     assert "23:00" in section
     assert "口数が少なく" in section  # 疲労反応：静か
-    assert "もう少しマスターと話していたい" in section  # 眠気反応：会話を求める
+    assert f"もう少し{SUI.user_name}と話していたい" in section  # 眠気反応：会話を求める
     fresh = StateEngine(SUI, None, at(12)).prompt_section(at(12))
     assert "口数が少なく" not in fresh
     assert "話していたい" not in fresh

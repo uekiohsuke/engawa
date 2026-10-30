@@ -20,7 +20,7 @@ def expression_section(expressions: Iterable[str]) -> str | None:
     lines = [
         "## 表情",
         "返事の一番最初に、そのときの表情をタグで1つだけ付けること（例：[joy] そっか、良かったじゃん。）。",
-        "タグは画面の立ち絵を切り替えるためのもので、マスターには見えない。本文の途中や最後には付けないこと。",
+        "タグは画面の立ち絵を切り替えるためのもので、相手には見えない。本文の途中や最後には付けないこと。",
         *(f"- [{e}]：{EXPRESSION_DESCRIPTIONS.get(e, e)}" for e in expressions),
     ]
     return "\n".join(lines)

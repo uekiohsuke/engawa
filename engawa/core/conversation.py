@@ -30,10 +30,10 @@ SUB_ARCHIVE_AFTER = timedelta(days=3)
 ELAPSED_NOTICE_AFTER = timedelta(minutes=30)  # これ以上間が空いたら「〜ぶり」を伝える
 
 
-def time_section(elapsed: timedelta | None) -> str:
+def time_section(elapsed: timedelta | None, user_name: str) -> str:
     lines = [
         "## 時間の流れ",
-        "- マスターの発言の先頭の（月/日 時:分）は、その発言をした日時。返事には書かないこと。",
+        f"- {user_name}の発言の先頭の（月/日 時:分）は、その発言をした日時。返事には書かないこと。",
     ]
     if elapsed is not None and elapsed >= ELAPSED_NOTICE_AFTER:
         lines.append(f"- この会話での前回のやりとりから{describe_elapsed(elapsed)}ぶり。間が空いたことを踏まえて話すこと。")
@@ -45,7 +45,7 @@ def asleep_notice(character: Character) -> str:
 
 
 def should_say_goodnight(sleep_at: datetime, last_user_at: datetime | None) -> bool:
-    """眠りに落ちた時刻の前後にマスターと話していたなら、おやすみを言って切り上げる（仕様6-3）。
+    """眠りに落ちた時刻の前後にユーザーと話していたなら、おやすみを言って切り上げる（仕様6-3）。
 
     「前後」なのは、定期更新の合間に話しかけられて、その発言で眠りに落ちたと判明する場合があるため。
     """
@@ -112,7 +112,7 @@ class ConversationService:
         if self._memory:
             sections.append(self._memory.profile_section(character.id))
         sections.append(self._state.prompt_section(character.id))
-        sections.append(time_section(elapsed))
+        sections.append(time_section(elapsed, character.user_name))
         if self._memory and related:
             sections.append(self._memory.related_section(character, related))
         sections.append(expression_section(character.images.standing))

@@ -125,7 +125,7 @@ FATIGUE_HINTS = {
 SLEEPINESS_HINTS = {
     "あっさり寝る": "眠いので、会話はそっけなく切り上げたがる。",
     "軽く挨拶": "眠いので、長話はせず、おやすみの一言くらいは言いたい。",
-    "会話を求める": "眠いけれど、寝る前にもう少しマスターと話していたい。",
+    "会話を求める": "眠いけれど、寝る前にもう少し{user}と話していたい。",
 }
 
 
@@ -221,7 +221,7 @@ class StateEngine:
         if s.fatigue >= FATIGUE_HIGH:
             lines.append(f"- {FATIGUE_HINTS[p.fatigue_response]}")
         if s.sleepiness >= SLEEPINESS_PRE_SLEEP:
-            lines.append(f"- {SLEEPINESS_HINTS[p.sleepiness_response]}")
+            lines.append(f"- {SLEEPINESS_HINTS[p.sleepiness_response].format(user=self.character.user_name)}")
         return "\n".join(lines)
 
     def snapshot(self, now: datetime, focus_mode: bool = False) -> dict[str, Any]:

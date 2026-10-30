@@ -5,7 +5,7 @@
 - エピソード記憶：短期記憶から切り出した出来事単位の記憶。毎ターン、コードが意味検索してヒットしたものだけを
   プロンプトに入れる。削除猶予（過ぎたら削除対象）と時限（過ぎたら即削除）を持ち、思い出されると両方延びる。
   件数が上限を超えたら、削除対象の中から重み付きのランダムで少しずつ消す。
-- プロフィール記憶：自分自身とマスターの「印象層」。常にプロンプトに載せる。日中は変えず、睡眠中に
+- プロフィール記憶：自分自身とユーザーの「印象層」。常にプロンプトに載せる。日中は変えず、睡眠中に
   その日の印象メモからまとめて書き直す。自分のプロフィールの土台はペルソナ（persona/*.md）で、印象層はその上の積み重ね。
 - 会話の種：思い出し（エピソードから。記憶調整で作る）と話題作成（印象層から。睡眠中に作る）。即興は保存しない。
 - 記憶調整：判定層が選んだときに、短期記憶をエピソード化する。続いている最新の会話はエピソード化しない。
@@ -74,8 +74,9 @@ ACTIVITY_TITLE_MAX = 120
 IMPROMPTU_ACTIVITY_WINDOW = timedelta(minutes=30)
 IMPROMPTU_ACTIVITY_MAX = 5
 
-# マスターの性別は決めていないので、LLMに推測させない
-NO_PRONOUN_RULE = "マスターのことは「マスター」と書き、「彼」「彼女」などの三人称の代名詞は使わないこと。"
+def no_pronoun_rule(user_name: str) -> str:
+    # ユーザーの性別は決めていないので、LLMに推測させない
+    return f"{user_name}のことは「{user_name}」と書き、「彼」「彼女」などの三人称の代名詞は使わないこと。"
 
 SESSION_LABELS = {"dialogue": "対話", "main": "#main", "sub": "サブチャンネル"}
 
@@ -244,7 +245,7 @@ class MemoryService:
         return "\n".join(
             [
                 "## 記憶（これまでに積み重なった印象）",
-                "### マスターについて",
+                f"### {self._characters[character_id].user_name}について",
                 user or "（まだ無い）",
                 "### 自分について",
                 own or "（まだ無い）",
@@ -345,7 +346,7 @@ class MemoryService:
                 f"### 会話{block['no']}：{title}　最後の発言から{describe_elapsed(elapsed)}{note}",
                 *(
                     f"#{m['id']} [{_stamp(m['created_at'])}] "
-                    f"{'マスター' if m['role'] == 'user' else character.name}：{m['content']}"
+                    f"{character.user_name if m['role'] == 'user' else character.name}：{m['content']}"
                     for m in messages
                 ),
                 "",
@@ -353,20 +354,20 @@ class MemoryService:
         prompt = "\n".join(
             [
                 f"{ADJUST_PREFIX}あなたはキャラクター「{character.name}」の記憶を整理する係です。",
-                f"{character.name}はマスター（ユーザー）のデスクトップに住む隣人です。まだ記憶にしていない会話を振り返り、"
+                f"{character.name}は{character.user_name}（ユーザー）のデスクトップに住む隣人です。まだ記憶にしていない会話を振り返り、"
                 "出来事単位の記憶（エピソード）に切り出してください。",
                 "",
                 "## ルール",
                 "- エピソードは1つの会話の中の、ひとまとまりの出来事（話題）。会話番号と発言番号の範囲（from〜to）で示す。",
                 "- 「（終わった会話）」は、最初の発言から最後の発言まで漏れなくどれかのエピソードに含めること。",
-                "- 重要そうな出来事（マスターの予定・好み・悩み・嬉しかったこと、約束など）は具体的に詳しく、"
+                f"- 重要そうな出来事（{character.user_name}の予定・好み・悩み・嬉しかったこと、約束など）は具体的に詳しく、"
                 "ただの挨拶や他愛ないやり取りは1文で簡潔に書く。詳しさがそのまま記憶の残りやすさになる。",
                 f"- エピソードは{character.name}の視点で、後から読んで何があったか分かるように、常体（だ・である調）の地の文で書く。",
                 "- 各エピソードについて、印象メモを書いてよい（無ければ null）。"
                 f"{MAX_MEMO_CHARS}字以内、{character.name}の一人称・常体で。",
-                "  - about_master：そこから分かったマスターのこと（好み・予定・事情・人柄など）。"
+                f"  - about_master：そこから分かった{character.user_name}のこと（好み・予定・事情・人柄など）。"
                 "1回の出来事から性格を決めつけず、分かった事実を中心に書く。",
-                f"  - about_self：{character.name}自身の気持ちや好み（例：「マスターの山の話を聞くのは楽しい」）。"
+                f"  - about_self：{character.name}自身の気持ちや好み（例：「{character.user_name}の山の話を聞くのは楽しい」）。"
                 "自分の応対の出来を評価したり、「成長した」「寄り添えた」のような振り返りは書かない。",
                 "- 「（まだ続いているかもしれない）」会話は、話の流れから、まだ続いていると思う部分があれば"
                 "その最初の発言番号を ongoing に挙げる。そこから先はエピソードにしない（次の機会に回す）。"
@@ -375,7 +376,7 @@ class MemoryService:
                 f"（後日どうなったかを聞きたい予定など）があれば、会話の種（recall_seeds）として最大{MAX_RECALL_SEEDS}個、"
                 "20〜60字で書く。無理に作らなくてよい。",
                 "- 既存の会話の種のうち、もう話す必要がなくなったもの（会話で既に話題になった等）があれば番号を挙げる。",
-                f"- {NO_PRONOUN_RULE}",
+                f"- {no_pronoun_rule(character.user_name)}",
                 "",
                 f"- 現在時刻：{now:%m/%d %H:%M}",
                 "",
@@ -526,10 +527,10 @@ class MemoryService:
         self, character: Character, subject: str, memos: list[dict[str, Any]], with_topics: bool
     ) -> list[dict[str, str]]:
         current = self._db.get_profiles(character.id).get(subject, {}).get("impression", "")
-        target = "マスター" if subject == SUBJECT_USER else f"{character.name}自身"
+        target = character.user_name if subject == SUBJECT_USER else f"{character.name}自身"
         seeds = self._db.list_seeds(character.id, since=(self._now() - SEED_TTL).isoformat(), unused_only=True)
         topics = (
-            f"- あわせて、更新した印象から「〇〇好きだったよね」のように、あとで自分からマスターに振ってみたい話題を"
+            f"- あわせて、更新した印象から「〇〇好きだったよね」のように、あとで自分から{character.user_name}に振ってみたい話題を"
             f"会話の種（topic_seeds）として最大{MAX_TOPIC_SEEDS}個、20〜60字で作る。"
             "印象に書かれた具体的な物事（好きなもの・予定・事情）に触れること。「最近どう？」のような誰にでも言える話題や、"
             "既存の会話の種と同じ話題は作らない。"
@@ -555,7 +556,7 @@ class MemoryService:
                     else []
                 ),
                 topics,
-                f"- {NO_PRONOUN_RULE}",
+                f"- {no_pronoun_rule(character.user_name)}",
                 "",
                 "## 既存の印象",
                 current or "（まだ無い）",
@@ -617,7 +618,7 @@ class MemoryService:
         result["expired_activity"] = self._db.delete_activity_before((now - ACTIVITY_TTL).isoformat())
 
         profiles = "、".join(
-            f"{'マスター' if s == SUBJECT_USER else '自分'}の印象 {n}字" for s, n in result["profiles"].items()
+            f"{character.user_name if s == SUBJECT_USER else '自分'}の印象 {n}字" for s, n in result["profiles"].items()
         )
         await self._state.record(
             character_id,

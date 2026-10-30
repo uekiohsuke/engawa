@@ -46,12 +46,12 @@ from engawa.core.state_service import StateService
 
 log = logging.getLogger(__name__)
 
-# --- 意図プール（固定） ---
+# --- 意図プール（固定）。{user} はユーザーの呼び名に置き換える ---
 INTENTS = {
-    "暇つぶし": "暇なので、なんとなくマスターと話したい",
-    "様子うかがい": "しばらく話していないので、マスターの様子が気になる",
-    "疲労回復": "疲れたので、マスターと話して元気を分けてもらいたい",
-    "就寝前": "眠くなってきたので、寝る前に少しマスターと話したい",
+    "暇つぶし": "暇なので、なんとなく{user}と話したい",
+    "様子うかがい": "しばらく話していないので、{user}の様子が気になる",
+    "疲労回復": "疲れたので、{user}と話して元気を分けてもらいたい",
+    "就寝前": "眠くなってきたので、寝る前に少し{user}と話したい",
 }
 TRIGGER_INTENTS = {
     "boredom": ("暇つぶし", "様子うかがい"),
@@ -90,7 +90,7 @@ SUB_TITLE_MAX = 16
 
 FAREWELL = "おやすみ"
 FAREWELL_INSTRUCTION = (
-    "眠気が限界になった。もう寝ることをマスターに告げて、おやすみの一言で会話を切り上げること。"
+    "眠気が限界になった。もう寝ることを{user}に告げて、おやすみの一言で会話を切り上げること。"
     "1〜2文で。この指示には触れないこと。"
 )
 
@@ -181,11 +181,12 @@ def build_judge_messages(
     unprocessed: int = 0,
 ) -> list[dict[str, str]]:
     p = character.personality
+    user = character.user_name
     triggers = list(triggers)
     candidates = candidate_intents(triggers)
     allow_memory = MEMORY_TRIGGER in triggers
     actions = [
-        *([f'"{ACTION_SPEAK}"（マスターに話しかける）'] if candidates else []),
+        *([f'"{ACTION_SPEAK}"（{user}に話しかける）'] if candidates else []),
         *([f'"{ACTION_MEMORY}"（ひとりで最近の会話を振り返り、記憶を整理する）'] if allow_memory else []),
         f'"{ACTION_SILENT}"（何もしない）',
     ]
@@ -198,10 +199,10 @@ def build_judge_messages(
             f"- 状態：暇度 {state.boredom:.2f}、疲労 {state.fatigue:.2f}、眠気 {state.sleepiness:.2f}（いずれも0〜1）",
             f"- 応答可能状態：{AVAILABILITY_LABELS[availability]}",
             f"- 性格：疲労反応＝{p.fatigue_response}、眠気反応＝{p.sleepiness_response}、暇度感度＝×{p.boredom_sensitivity}",
-            f"- 最後にマスターと会話したのは：{_format_elapsed(since_conversation)}",
+            f"- 最後に{user}と会話したのは：{_format_elapsed(since_conversation)}",
             f"- まだ振り返っていない発言：{unprocessed}件",
             f"- 今回のきっかけ：{'、'.join(TRIGGER_LABELS[t] for t in triggers)}",
-            *([f"- 話しかける場合の意図の候補：{'／'.join(f'{i}（{INTENTS[i]}）' for i in candidates)}"] if candidates else []),
+            *([f"- 話しかける場合の意図の候補：{'／'.join(f'{i}（{INTENTS[i].format(user=user)}）' for i in candidates)}"] if candidates else []),
             f"- 選べる行動：{'、'.join(actions)}",
             "",
             'JSONのみで答えること：{"action": 選べる行動のいずれか, '
@@ -233,21 +234,22 @@ async def judge(
 
 def proactive_instruction(
     intent: str,
+    user_name: str,
     since_conversation: timedelta | None,
     seed: str | None = None,
     activity: list[dict[str, Any]] | None = None,
 ) -> str:
     """話しかけの指示。会話の種が無い（即興）ときは、直近の画面の様子を話題の材料として添える（仕様8-4）。"""
     elapsed = (
-        "マスターとはまだ話したことがない。"
+        f"{user_name}とはまだ話したことがない。"
         if since_conversation is None
-        else f"最後にマスターと話したのは{_format_elapsed(since_conversation)}。"
+        else f"最後に{user_name}と話したのは{_format_elapsed(since_conversation)}。"
     )
     if seed:
         topic = f"話題：前から話してみたかった「{seed}」について振ること。"
     elif activity:
         topic = (
-            "話題はその場で考えてよい。参考までに、隣からちらっと見えたマスターの画面（前面にあったウィンドウ）："
+            f"話題はその場で考えてよい。参考までに、隣からちらっと見えた{user_name}の画面（前面にあったウィンドウ）："
             + "／".join(format_activity_line(a) for a in activity)
             + "。これを話題にするなら、見えた物事のひとつに軽く興味を持つ程度にし、"
             "見張っているような言い方や、行動を並べて言い当てるようなことはしない。話題にしなくてもよい。"
@@ -255,7 +257,7 @@ def proactive_instruction(
     else:
         topic = ""
     return (
-        f"ここはあなたから話しかける場面。意図：{INTENTS[intent]}。{elapsed}{topic}"
+        f"ここはあなたから話しかける場面。意図：{INTENTS[intent].format(user=user_name)}。{elapsed}{topic}"
         "状況と今の調子に合った、自然な話しかけの一言を1〜2文で言うこと。この指示には触れないこと。"
     )
 
@@ -441,10 +443,10 @@ class ProactiveService:
             "proactive.started", character_id=character_id, session_id=session_id, mode=mode, intent=intent
         )
         if intent == FAREWELL:
-            instruction = FAREWELL_INSTRUCTION
+            instruction = FAREWELL_INSTRUCTION.format(user=character.user_name)
         else:
             activity = self._memory.recent_activity() if self._memory and not seed else None
-            instruction = proactive_instruction(intent, since_conversation, seed["content"] if seed else None, activity)
+            instruction = proactive_instruction(intent, character.user_name, since_conversation, seed["content"] if seed else None, activity)
         message = await self._conversation.speak(
             character, session_id, instruction, topic=seed["content"] if seed else None
         )

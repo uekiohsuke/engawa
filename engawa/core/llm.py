@@ -103,12 +103,12 @@ class OllamaClient:
 
 MOCK_REPLIES = [
     "「{text}」って？ ……ふーん、ちゃんと聞いてるよ。続けて。",
-    "へえ、「{text}」ね。マスターがそういう話するの、ちょっと珍しいじゃん。",
+    "へえ、「{text}」ね。君がそういう話するの、ちょっと珍しいじゃん。",
     "「{text}」かあ。……べ、別に興味津々とかじゃないけど、もうちょっと詳しく聞かせてよ。",
 ]
 
 
-MOCK_PROACTIVE_REPLY = "ねえマスター、ちょっといい？ ……別に用ってわけじゃないけど。"
+MOCK_PROACTIVE_REPLY = "ねえ、ちょっといい？ ……別に用ってわけじゃないけど。"
 
 
 def mock_adjust(prompt: str) -> dict[str, Any]:

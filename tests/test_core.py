@@ -76,6 +76,7 @@ def test_build_messages_uses_persona_and_window(tmp_path):
     messages = service.build_messages(get_character("sui"), sid)
     assert messages[0]["role"] == "system"
     assert "翠" in messages[0]["content"]
+    assert "{user}" not in messages[0]["content"] and "ousuke" in messages[0]["content"]  # ペルソナの呼び名の置き換え
     assert "## 現在の状態" in messages[0]["content"]
     assert "9月28日（月） 12:00（昼・秋）" in messages[0]["content"]
     assert "## 表情" in messages[0]["content"]
