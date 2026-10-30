@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
 )
 
 from engawa.ui.client import CoreClient
+from engawa.ui.data_panel import DataPanel
 from engawa.ui.memory_panel import MemoryPanel
 from engawa.ui.widgets import COLORS, format_time
 
@@ -133,6 +134,7 @@ class StateWindow(QWidget):
         tabs = QTabWidget()
         tabs.addTab(state_tab, "状態")
         tabs.addTab(MemoryPanel(client, character), "記憶")
+        tabs.addTab(DataPanel(client, character), "データ")
         layout = QVBoxLayout(self)
         layout.setContentsMargins(16, 12, 16, 16)
         layout.addWidget(tabs)

@@ -423,6 +423,9 @@ class MainWindow(QMainWindow):
         if kind in ("session.created", "session.updated"):
             self._on_session_changed(event["session"])
             return
+        if kind == "data.replaced":
+            self._reload_sessions()
+            return
         session_id = event.get("session_id") or event.get("message", {}).get("session_id")
         if kind == "generation.started":
             self._busy_sessions.add(session_id)
@@ -445,6 +448,27 @@ class MainWindow(QMainWindow):
         elif kind == "error":
             self._message_view.abort_stream()
             self._message_view.add_notice(f"応答に失敗しました：{event.get('detail')}")
+
+    def _reload_sessions(self) -> None:
+        """データが入れ替わった（リセット・復元）ので、チャンネルと対話を読み直す。セッションの ID も変わっている。"""
+        for window in self._dialogue_windows.values():
+            window.hide()
+            window.deleteLater()
+        self._dialogue_windows.clear()
+        self._busy_sessions.clear()
+        self._unread.clear()
+        self._current_session = None
+        loaded: dict[str, list[dict]] = {}
+
+        def on_sessions(character_id: str, sessions: list[dict]) -> None:
+            loaded[character_id] = sessions
+            if len(loaded) == len(self._characters):
+                self._sessions = {s["id"]: s for ss in loaded.values() for s in ss}
+                self._message_view.clear()
+                self._render_channels()
+
+        for character_id in self._characters:
+            self._client.get(f"/characters/{character_id}/sessions", lambda result, cid=character_id: on_sessions(cid, result))
 
     def _on_new_message(self, message: dict) -> None:
         """チャンネルの並び順（新しい順）と未読マークを更新する。対話セッションは一覧に出ないので対象外。"""

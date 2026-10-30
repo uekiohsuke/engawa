@@ -111,7 +111,9 @@ class MemoryPanel(QWidget):
         )
 
     def _on_event(self, event: dict) -> None:
-        if event.get("type") == "memory.updated" and event.get("character_id") == self._character_id:
+        if event.get("type") == "data.replaced" or (
+            event.get("type") == "memory.updated" and event.get("character_id") == self._character_id
+        ):
             self.reload()
 
     def apply(self, memory: dict) -> None:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import random
 from collections.abc import Callable
 from contextlib import asynccontextmanager
@@ -11,6 +12,7 @@ from pydantic import BaseModel, Field
 
 from engawa.characters import CHARACTERS, get_character
 from engawa.config import Settings, load_settings
+from engawa.core.backup import BackupNotFoundError, BackupStore
 from engawa.core.conversation import ConversationService, SessionBusyError
 from engawa.core.db import Database
 from engawa.core.events import EventHub
@@ -57,6 +59,8 @@ def create_app(
     memory_llm = memory_llm or llm or create_memory_llm(settings)
     llm = llm or create_llm(settings)
     db = db or Database(settings.db_path)
+    backups = BackupStore(settings.backup_dir)
+    data_lock = asyncio.Lock()
     hub = EventHub()
     judge_llm = judge_llm or create_judge_llm(settings)
     embedder = embedder or create_embedder(settings)
@@ -95,6 +99,7 @@ def create_app(
         "memory": memory,
         "conversation": conversation,
         "proactive": proactive,
+        "backups": backups,
     }
 
     def require_character(character_id: str) -> None:
@@ -206,6 +211,61 @@ def create_app(
             return await conversation.post_user_message(character, session_id, body.content)
         except SessionBusyError:
             raise HTTPException(409, "character is still replying in this session")
+
+    # --- データ（リセット・バックアップ） ---
+
+    def require_backup(name: str) -> None:
+        try:
+            backups.path(name)
+        except BackupNotFoundError:
+            raise HTTPException(404, "backup not found")
+
+    async def replace_data(change: Callable[[], None], reason: str) -> dict:
+        """今のデータをバックアップしてから入れ替え、各サービスに読み直させる。"""
+        if conversation.generating:
+            raise HTTPException(409, "返事を生成している最中です")
+        if memory.working:
+            raise HTTPException(409, "記憶の処理をしている最中です")
+        async with data_lock:
+            backup = backups.create(db, reason, state.now())
+            proactive.reset()
+            change()
+            for character_id in CHARACTERS:
+                db.ensure_default_sessions(character_id)
+            await state.reload()
+            await hub.publish("data.replaced", reason=reason)
+            return backup
+
+    @app.get("/backups")
+    async def list_backups():
+        return backups.list()
+
+    @app.post("/backups", status_code=201)
+    async def create_backup():
+        async with data_lock:
+            return backups.create(db, "manual", state.now())
+
+    @app.get("/backups/{name}")
+    async def preview_backup(name: str):
+        require_backup(name)
+        return backups.preview(name)
+
+    @app.delete("/backups/{name}", status_code=204)
+    async def delete_backup(name: str):
+        require_backup(name)
+        backups.delete(name)
+
+    @app.post("/backups/{name}/restore")
+    async def restore_backup(name: str):
+        """バックアップの状態に戻す。戻す前の状態もバックアップする（戻したことも取り消せる）。"""
+        require_backup(name)
+        backup = await replace_data(lambda: db.restore_from(backups.path(name)), "restore")
+        return {"restored": name, "backup": backup}
+
+    @app.post("/data/reset")
+    async def reset_data():
+        """会話・記憶・内部状態をすべて消して最初からにする。消す前の状態はバックアップする。"""
+        return {"backup": await replace_data(db.reset, "reset")}
 
     @app.websocket("/ws")
     async def websocket(ws: WebSocket):

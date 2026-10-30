@@ -65,6 +65,10 @@ class CoreClient(QObject):
     ) -> None:
         self._send_json("PATCH", path, body, on_success, on_error)
 
+    def delete(self, path: str, on_success: JsonCallback | None = None, on_error: ErrorCallback | None = None) -> None:
+        reply = self._nam.deleteResource(QNetworkRequest(QUrl(self._base_url + path)))
+        reply.finished.connect(lambda: self._handle_reply(reply, on_success, on_error))
+
     def _send_json(
         self,
         method: str,

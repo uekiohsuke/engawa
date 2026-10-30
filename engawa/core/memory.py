@@ -157,6 +157,11 @@ class MemoryService:
     def _now(self) -> datetime:
         return self._state.now()
 
+    @property
+    def working(self) -> bool:
+        """記憶調整・睡眠中の整理・埋め込みの計算などをしている最中か。"""
+        return bool(self._tasks or self._consolidating) or any(lock.locked() for lock in self._locks.values())
+
     async def wait_idle(self) -> None:
         """バックグラウンドの処理を待つ（テスト用）。"""
         while self._tasks:

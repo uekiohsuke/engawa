@@ -306,6 +306,14 @@ class ProactiveService:
             if task:
                 task.cancel()
 
+    def reset(self) -> None:
+        """データを入れ替えたときに、入れ替え前の会話に結びついた待ち（対話の送り直しなど）と判定の材料を捨てる。"""
+        for task in list(self._tasks):
+            task.cancel()
+        for character_id in self._characters:
+            self._pending_crossings[character_id].clear()
+            self._proactive_times[character_id].clear()
+
     async def _loop(self) -> None:
         while True:
             await asyncio.sleep(self._interval)

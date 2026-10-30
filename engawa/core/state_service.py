@@ -41,12 +41,30 @@ class StateService:
         self._task: asyncio.Task[None] | None = None
         self._listeners: list[StateListener] = []
         self._focus_mode = bool(db.get_setting(FOCUS_MODE_KEY, False))
-        now = clock()
+        self._characters = list(characters)
         self._engines: dict[str, StateEngine] = {}
-        for character in characters:
-            saved = db.load_state(character.id)
+        self._load_engines(resume=False)
+
+    def _load_engines(self, resume: bool) -> None:
+        now = self._clock()
+        for character in self._characters:
+            saved = self._db.load_state(character.id)
             state = CharacterState.from_dict(saved) if saved else None
+            if state and resume:
+                state.updated_at = now.isoformat()
             self._engines[character.id] = StateEngine(character, state, now)
+
+    async def reload(self) -> None:
+        """データを入れ替えた（リセット・バックアップからの復元）あとに読み直す。
+
+        復元したときは、バックアップを取った時点の状態から今を続ける（その間の時間は進めない）。
+        集中モードは入れ替え前のものを引き継ぐ。
+        """
+        self._db.set_setting(FOCUS_MODE_KEY, self._focus_mode)
+        self._load_engines(resume=True)
+        for character_id, engine in self._engines.items():
+            self._db.save_state(character_id, engine.state.to_dict())
+            await self._publish(character_id)
 
     def now(self) -> datetime:
         return self._clock()

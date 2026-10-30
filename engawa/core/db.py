@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -157,6 +158,32 @@ class Database:
 
     def close(self) -> None:
         self._conn.close()
+
+    # --- バックアップ・リセット ---
+
+    def backup_to(self, path: Path) -> None:
+        with self._lock, closing(sqlite3.connect(str(path))) as target:
+            self._conn.backup(target)
+
+    def restore_from(self, path: Path) -> None:
+        """開いたまま、中身をバックアップのものに入れ替える。古い形式なら今の形式に直す。"""
+        with self._lock, closing(sqlite3.connect(f"{Path(path).resolve().as_uri()}?mode=ro", uri=True)) as source:
+            source.backup(self._conn)
+            self._drop_v1_memory()
+            self._conn.executescript(SCHEMA)
+            self._migrate()
+
+    def reset(self) -> None:
+        """設定（app_settings）以外のデータをすべて消す。ID も 1 から振り直す。"""
+        with self._lock, self._conn:
+            tables = [
+                r[0]
+                for r in self._conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+                if r[0] not in ("app_settings", "sqlite_sequence")
+            ]
+            for table in tables:
+                self._conn.execute(f"DELETE FROM {table}")
+            self._conn.execute("DELETE FROM sqlite_sequence")
 
     def ensure_default_sessions(self, character_id: str) -> None:
         """キャラクターごとに対話セッションとメインスレッドを1つずつ確保する。"""

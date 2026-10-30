@@ -74,6 +74,10 @@ class ConversationService:
     def is_busy(self, session_id: int) -> bool:
         return session_id in self._busy
 
+    @property
+    def generating(self) -> bool:
+        return bool(self._busy)
+
     # --- サブスレッド（サブチャンネル） ---
 
     async def create_sub_session(self, character_id: str, title: str) -> dict[str, Any]:

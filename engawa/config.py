@@ -41,6 +41,10 @@ class Settings:
         return self.data_dir / "engawa.db"
 
     @property
+    def backup_dir(self) -> Path:
+        return self.data_dir / "backups"
+
+    @property
     def core_base_url(self) -> str:
         return f"http://{self.core_host}:{self.core_port}"
 
